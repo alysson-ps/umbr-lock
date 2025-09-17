@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+
+members = ["crates/umbr-core", "crates/uheex", "crates/umbr-lock"]
+
+
+[profile.dev]
+opt-level = 0
+debug = 0
+codegen-units = 256
+incremental = true
+lto = "off"
