@@ -3,6 +3,10 @@ name = "uheex"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["runtime"]   # se quiser, runtime vem por padrão
+runtime = []            # feature opcional
+
 [dependencies]
 logos = "0.15.1"
 chumsky = "0.10.1"

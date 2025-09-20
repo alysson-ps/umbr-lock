@@ -9,6 +9,7 @@ use std::env;
 use std::error::Error;
 use std::io::Write;
 
+use thiserror::Error;
 use zbus::Result;
 use zbus::{Connection, proxy, zvariant::OwnedObjectPath};
 
@@ -82,3 +83,13 @@ fn logger(message: &str, level: &str) {
         _ => {}
     }
 }
+
+#[derive(Error, Debug)]
+pub enum UmbrError {
+    #[error("{0}")]
+    Generic(String),
+    #[error("")]
+    WindowingThreadQuit,
+}
+
+pub type Anyresult<T> = std::result::Result<T, UmbrError>;

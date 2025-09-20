@@ -1,21 +1,85 @@
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 use clap::Parser;
-use uheex::parser;
+use uheex::parser::parser;
+use umbr_core::{Anyresult, UmbrError};
 
-/// Simple program to greet a person
+/// Umbr Lock CLI - Manage and preview Umbr lock files
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(
+    name = "umbr-lock",
+    author = "Alysson <dev.alysson@hotmail.com>",
+    version,
+    about = "A CLI tool to manage and preview Umbr lock files.",
+    long_about = "Umbr Lock is a command-line tool for managing and previewing lock files in Umbr projects."
+)]
 struct Args {
-    /// Name of the person to greet
-    #[arg(short, long)]
-    name: String,
+    /// Watch for changes in lock files
+    #[arg(short, long, default_value_t = false)]
+    watch: bool,
 
-    /// Number of times to greet
-    #[arg(short, long, default_value_t = 1)]
-    count: u8,
+    /// Preview the current lock file
+    #[arg(short, long, default_value_t = false)]
+    preview: bool,
 }
 
-fn main() {
-    // let _ = umbr_core::lock();
-    // parser(r#"<U.Button text="Desbloquear" u-click={@unlock_user} /> "#);
-    parser(r#"<U.Button :text="Desbloquear"> <U.label> <% @hello %> </U.label> </U.Button>"#);
+const SRC: &str = r#"
+    <U.Box :direction "column" :spacing 8>
+        <U.Button :text "Desbloquear" />
+        <U.Label>
+            <% @hello %>
+        </U.Label>
+    </U.Box>
+"#;
+
+fn main() -> Anyresult<()> {
+    let args = Args::parse();
+
+    dbg!(&args);
+
+    if args.preview {
+        let (sender_to_render, receiver_from_windowing) =
+            mpsc::channel::<umbr_ui::types::WindowingMessage>();
+        let (sender_to_windowing, receiver_from_render) =
+            mpsc::channel::<umbr_ui::types::UiMessage>();
+
+        let handle = thread::spawn(move || {
+            if umbr_ui::win::windowing_thread(sender_to_render.clone(), receiver_from_render)
+                .is_err()
+            {
+                println!("aqui");
+                sender_to_render
+                    .send(umbr_ui::types::WindowingMessage::Quit)
+                    .unwrap();
+            }
+        });
+
+        thread::sleep(Duration::from_secs(5));
+
+        sender_to_windowing
+            .send(umbr_ui::types::UiMessage::UnlockWithPassword {
+                password: "test".into(),
+            })
+            .unwrap();
+
+        if let Some(ast) = parser(SRC) {
+            umbr_ui::mount_ui(ast);
+        }
+
+        loop {
+            if let Ok(msg) = receiver_from_windowing.try_recv() {
+                match msg {
+                    umbr_ui::types::WindowingMessage::Quit => {
+                        return Err(umbr_core::UmbrError::WindowingThreadQuit);
+                    }
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    Ok(())
 }

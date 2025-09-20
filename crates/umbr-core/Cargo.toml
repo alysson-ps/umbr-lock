@@ -9,6 +9,4 @@ anyhow = "1.0.99"
 whoami = "1.6.1"
 crossterm = "0.29.0"
 tokio = { version = "1.47.1", features = ["full"] }
-
-# gtk4 = "0.10.0"
-# gtk4-layer-shell = "0.6.3"
+thiserror = "2.0.16"

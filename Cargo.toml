@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 
-members = ["crates/umbr-core", "crates/uheex", "crates/umbr-lock"]
+members = ["crates/umbr-core", "crates/uheex", "crates/umbr-lock", "crates/umbr-ui"]
 
 
 [profile.dev]
