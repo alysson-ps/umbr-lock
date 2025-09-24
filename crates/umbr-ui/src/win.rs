@@ -5,13 +5,14 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        Capability, SeatHandler, SeatState,
     },
     shm::{
-        self, Shm, ShmHandler,
+        self,
         slot::{Buffer, SlotPool},
+        Shm, ShmHandler,
     },
 };
 use std::{
@@ -19,7 +20,7 @@ use std::{
     time::Duration,
 };
 use wayland_client::{
-    Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
+    delegate_noop,
     globals::registry_queue_init,
     protocol::{
         wl_buffer::{self, WlBuffer},
@@ -32,6 +33,7 @@ use wayland_client::{
         wl_surface::{self, WlSurface},
         wl_touch,
     },
+    Dispatch, DispatchError, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
@@ -68,9 +70,10 @@ pub fn windowing_thread(
     let shm_state = Shm::bind(&globals, &qh).expect("wl_shm not available");
     let wl_surface = compositor.create_surface(&qh, ());
     let output: wl_output::WlOutput = globals.bind(&qh, 1..=1, ()).unwrap();
-    let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = globals.bind(&qh, 1..=1, ()).map_err(|_| {
-        "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
-    })?;
+    let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 =
+        globals.bind(&qh, 1..=1, ()).map_err(|_| {
+            "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
+        })?;
     let session_lock = session_lock_manager.lock(&qh, ());
     // set surface role as session lock surface
     session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
@@ -123,16 +126,19 @@ pub fn windowing_thread(
 
                 continue 'event_loop;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                event_queue.blocking_dispatch(&mut state)?;
-
-                if !state.running {
-                    break 'event_loop;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 break 'event_loop;
             }
+        }
+
+        match event_queue.dispatch(&mut state, Some(Duration::from_millis(0))) {
+            Ok(_) | Err(DispatchError::Timeout) => {}
+            Err(err) => return Err(err.into()),
+        }
+
+        if !state.running {
+            break 'event_loop;
         }
     }
 
