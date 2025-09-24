@@ -15,11 +15,11 @@ use smithay_client_toolkit::{
     },
 };
 use std::{
-    sync::mpsc::{Receiver, Sender},
-    thread,
+    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
+    time::Duration,
 };
 use wayland_client::{
-    Dispatch, Proxy, QueueHandle, delegate_noop,
+    Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     globals::registry_queue_init,
     protocol::{
         wl_buffer::{self, WlBuffer},
@@ -91,55 +91,47 @@ pub fn windowing_thread(
 
     event_queue.roundtrip(&mut state)?;
 
-    while state.running {
-        event_queue.blocking_dispatch(&mut state).unwrap();
+    let fallback_size = (width as i32, height as i32);
+
+    'event_loop: while state.running {
+        event_queue.dispatch_pending(&mut state)?;
+        event_queue.flush()?;
+
+        if !state.running {
+            break 'event_loop;
+        }
 
         while let Ok(message) = receiver.try_recv() {
-            match message {
-                UiMessage::Render {
-                    width,
-                    height,
-                    stride,
-                    pixels,
-                } => {
-                    dbg!("Entrou aqui");
-                    state.render(
-                        &pixels,
-                        width as u32,
-                        height as u32,
-                    );
+            state.handle_ui_message(message, &mut event_queue, fallback_size)?;
+
+            if !state.running {
+                break 'event_loop;
+            }
+        }
+
+        if !state.running {
+            break 'event_loop;
+        }
+
+        match receiver.recv_timeout(Duration::from_millis(16)) {
+            Ok(message) => {
+                state.handle_ui_message(message, &mut event_queue, fallback_size)?;
+
+                if !state.running {
+                    break 'event_loop;
                 }
 
-                //  render(
-                //     &state.shm_state,
-                //     &state.wl_surface,
-                //     width.try_into().unwrap(),
-                //     height.try_into().unwrap(),
-                //     stride.try_into().unwrap(),
-                //     &pixels,
-                // ),
-                UiMessage::UnlockWithPassword { password } => {
-                    dbg!(&password);
-                    state.session_lock.unlock_and_destroy();
+                continue 'event_loop;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                event_queue.blocking_dispatch(&mut state)?;
 
-                    state.wl_surface.attach(None, 0, 0);
-                    state
-                        .wl_surface
-                        .damage_buffer(0, 0, width as i32, height as i32);
-                    state.wl_surface.commit();
-
-                    event_queue.roundtrip(&mut state).unwrap();
-
-                    event_queue.dispatch_pending(&mut state).unwrap();
-                    event_queue.flush().unwrap();
-                    // state.
-                    state
-                        .render_thread_sender
-                        .send(WindowingMessage::Quit)
-                        .unwrap();
-                    state.running = false;
-                    state.locked = false;
+                if !state.running {
+                    break 'event_loop;
                 }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                break 'event_loop;
             }
         }
     }
@@ -231,8 +223,8 @@ impl AppData {
 
         {
             for y in 0..height as usize {
-                let src_line =
-                    &pixels[(y * src_stride as usize)..(y * src_stride as usize + (width as usize * bpp))];
+                let src_line = &pixels
+                    [(y * src_stride as usize)..(y * src_stride as usize + (width as usize * bpp))];
                 let dst_line = &mut canvas
                     [(y * dst_stride as usize)..(y * dst_stride as usize + (width as usize * bpp))];
 
@@ -266,6 +258,59 @@ impl AppData {
         self.wl_surface
             .damage_buffer(0, 0, width as i32, height as i32);
         self.wl_surface.commit();
+    }
+
+    fn handle_ui_message(
+        &mut self,
+        message: UiMessage,
+        event_queue: &mut EventQueue<Self>,
+        fallback_size: (i32, i32),
+    ) -> Result<()> {
+        match message {
+            UiMessage::Render {
+                width,
+                height,
+                stride: _,
+                pixels,
+            } => {
+                dbg!("Entrou aqui");
+                self.render(&pixels, width as u32, height as u32);
+                event_queue.flush()?;
+            }
+            UiMessage::UnlockWithPassword { password } => {
+                dbg!(&password);
+                self.session_lock.unlock_and_destroy();
+
+                self.wl_surface.attach(None, 0, 0);
+
+                let (fallback_width, fallback_height) = fallback_size;
+                let damage_width = if self.width > 0 {
+                    self.width as i32
+                } else {
+                    fallback_width
+                };
+                let damage_height = if self.height > 0 {
+                    self.height as i32
+                } else {
+                    fallback_height
+                };
+
+                self.wl_surface
+                    .damage_buffer(0, 0, damage_width, damage_height);
+                self.wl_surface.commit();
+
+                event_queue.roundtrip(self)?;
+                event_queue.dispatch_pending(self)?;
+                event_queue.flush()?;
+                self.render_thread_sender
+                    .send(WindowingMessage::Quit)
+                    .unwrap();
+                self.running = false;
+                self.locked = false;
+            }
+        }
+
+        Ok(())
     }
 }
 
