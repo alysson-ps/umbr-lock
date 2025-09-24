@@ -138,10 +138,10 @@ fn convert_to_pixels(width: u32, height: u32) -> PixbufSnapshot {
 
     let buffer = offscreen.get_pixbuf().unwrap();
 
-    let width = buffer.width();
-    let height = buffer.height();
-    let stride = buffer.rowstride();
-    let n_channels = buffer.n_channels();
+    let width = buffer.get_width();
+    let height = buffer.get_height();
+    let stride = buffer.get_rowstride();
+    let n_channels = buffer.get_n_channels();
     let pixels = unsafe { buffer.get_pixels().to_vec() };
 
     PixbufSnapshot {
