@@ -1,6 +1,4 @@
 use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 use clap::Parser;
 use uheex::parser::parser;
@@ -43,27 +41,28 @@ fn main() -> Anyresult<()> {
         let (sender_to_windowing, receiver_from_render) =
             mpsc::channel::<umbr_ui::types::UiMessage>();
 
-        thread::spawn(move || {
-            if umbr_ui::win::windowing_thread(sender_to_render.clone(), receiver_from_render)
-                .is_err()
-            {
-                sender_to_render
-                    .send(umbr_ui::types::WindowingMessage::Quit)
-                    .unwrap();
-            }
-        });
+        let mut windowing =
+            umbr_ui::win::WindowingApp::initialize(sender_to_render.clone(), receiver_from_render)
+                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+        windowing
+            .initial_roundtrip()
+            .map_err(|err| UmbrError::Generic(err.to_string()))?;
 
         if let Some(_ast) = parser(SRC) {
-            let _ = umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing);
+            let mut ui_runtime =
+                umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing)?;
 
-            // sender_to_windowing
-            //     .send(umbr_ui::types::UiMessage::Render {
-            //         width: w,
-            //         height: h,
-            //         stride: s,
-            //         pixels,
-            //     })
-            //     .unwrap();
+            windowing
+                .process_ui_messages()
+                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+            while windowing.is_running() && ui_runtime.is_running() {
+                ui_runtime.process_messages()?;
+                windowing
+                    .dispatch_blocking()
+                    .map_err(|err| UmbrError::Generic(err.to_string()))?;
+            }
         }
 
         // thread::sleep(Duration::from_secs(2));

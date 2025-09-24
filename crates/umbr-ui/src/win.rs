@@ -16,10 +16,9 @@ use smithay_client_toolkit::{
 use std::{
     convert::TryFrom,
     sync::mpsc::{Receiver, Sender},
-    thread,
 };
 use wayland_client::{
-    Dispatch, Proxy, QueueHandle, delegate_noop,
+    Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     globals::registry_queue_init,
     protocol::{
         wl_buffer::{self, WlBuffer},
@@ -42,59 +41,88 @@ use crate::types::{EventKeys, UiMessage, WindowingMessage};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn windowing_thread(
-    sender: Sender<WindowingMessage>,
+pub struct WindowingApp {
+    event_queue: EventQueue<AppData>,
+    state: AppData,
     receiver: Receiver<UiMessage>,
-) -> Result<()> {
-    let conn = match Connection::connect_to_env() {
-        Ok(conn) => conn,
-        Err(e) => {
-            dbg!(&e);
-            eprintln!("Wayland connect failed: {e:?}");
-            eprintln!("WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
-            eprintln!("XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
-            panic!("erro");
+}
+
+impl WindowingApp {
+    pub fn initialize(
+        sender: Sender<WindowingMessage>,
+        receiver: Receiver<UiMessage>,
+    ) -> Result<Self> {
+        let conn = match Connection::connect_to_env() {
+            Ok(conn) => conn,
+            Err(e) => {
+                dbg!(&e);
+                eprintln!("Wayland connect failed: {e:?}");
+                eprintln!("WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
+                eprintln!("XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
+                panic!("erro");
+            }
+        };
+
+        let display = conn.display();
+
+        let mut event_queue = conn.new_event_queue();
+        let qh = event_queue.handle();
+
+        let (globals, _queue) = registry_queue_init::<AppData>(&conn).unwrap();
+
+        let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=5, ()).unwrap();
+        let shm_state = Shm::bind(&globals, &qh).expect("wl_shm not available");
+        let wl_surface = compositor.create_surface(&qh, ());
+        let output: wl_output::WlOutput = globals.bind(&qh, 1..=1, ()).unwrap();
+        let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .map_err(|_| {
+                "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
+            })?;
+        let session_lock = session_lock_manager.lock(&qh, ());
+        // set surface role as session lock surface
+        session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
+
+        let state = AppData::new(
+            conn,
+            RegistryState::new(&globals),
+            display,
+            wl_surface.clone(),
+            session_lock,
+            shm_state,
+            SeatState::new(&globals, &qh),
+            sender,
+        );
+
+        Ok(Self {
+            event_queue,
+            state,
+            receiver,
+        })
+    }
+
+    pub fn initial_roundtrip(&mut self) -> Result<()> {
+        self.event_queue.roundtrip(&mut self.state)?;
+        Ok(())
+    }
+
+    pub fn dispatch_blocking(&mut self) -> Result<()> {
+        self.process_ui_messages()?;
+        if self.state.running {
+            self.event_queue.blocking_dispatch(&mut self.state)?;
         }
-    };
+        self.process_ui_messages()?;
+        Ok(())
+    }
 
-    let display = conn.display();
+    pub fn dispatch_pending(&mut self) -> Result<()> {
+        self.event_queue.dispatch_pending(&mut self.state)?;
+        self.process_ui_messages()?;
+        Ok(())
+    }
 
-    let mut event_queue = conn.new_event_queue();
-    let qh = event_queue.handle();
-
-    let (globals, _queue) = registry_queue_init::<AppData>(&conn).unwrap();
-
-    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=5, ()).unwrap();
-    let shm_state = Shm::bind(&globals, &qh).expect("wl_shm not available");
-    let wl_surface = compositor.create_surface(&qh, ());
-    let output: wl_output::WlOutput = globals.bind(&qh, 1..=1, ()).unwrap();
-    let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = globals.bind(&qh, 1..=1, ()).map_err(|_| {
-        "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
-    })?;
-    let session_lock = session_lock_manager.lock(&qh, ());
-    // set surface role as session lock surface
-    session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
-    let (width, height) = (800, 600);
-
-    // paint_green(&shm_state, &wl_surface, width, height);
-
-    let mut state = AppData::new(
-        conn,
-        RegistryState::new(&globals),
-        display,
-        wl_surface.clone(),
-        session_lock,
-        shm_state,
-        SeatState::new(&globals, &qh),
-        sender,
-    );
-
-    event_queue.roundtrip(&mut state)?;
-
-    while state.running {
-        event_queue.blocking_dispatch(&mut state).unwrap();
-
-        while let Ok(message) = receiver.try_recv() {
+    pub fn process_ui_messages(&mut self) -> Result<()> {
+        while let Ok(message) = self.receiver.try_recv() {
             match message {
                 UiMessage::Render {
                     width,
@@ -104,46 +132,48 @@ pub fn windowing_thread(
                     pixels,
                 } => {
                     dbg!("Entrou aqui");
-                    state.render(&pixels, width, height, stride, n_channels);
+                    self.state
+                        .render(&pixels, width, height, stride, n_channels);
                 }
-
-                //  render(
-                //     &state.shm_state,
-                //     &state.wl_surface,
-                //     width.try_into().unwrap(),
-                //     height.try_into().unwrap(),
-                //     stride.try_into().unwrap(),
-                //     &pixels,
-                // ),
                 UiMessage::UnlockWithPassword { password } => {
                     dbg!(&password);
-                    state.session_lock.unlock_and_destroy();
+                    self.state.session_lock.unlock_and_destroy();
 
-                    state.wl_surface.attach(None, 0, 0);
-                    state
-                        .wl_surface
-                        .damage_buffer(0, 0, width as i32, height as i32);
-                    state.wl_surface.commit();
+                    self.state.wl_surface.attach(None, 0, 0);
+                    self.state.wl_surface.damage_buffer(
+                        0,
+                        0,
+                        self.state.width as i32,
+                        self.state.height as i32,
+                    );
+                    self.state.wl_surface.commit();
 
-                    event_queue.roundtrip(&mut state).unwrap();
+                    self.event_queue
+                        .roundtrip(&mut self.state)
+                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
-                    event_queue.dispatch_pending(&mut state).unwrap();
-                    event_queue.flush().unwrap();
-                    // state.
-                    state
+                    self.event_queue
+                        .dispatch_pending(&mut self.state)
+                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                    self.event_queue
+                        .flush()
+                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                    self.state
                         .render_thread_sender
                         .send(WindowingMessage::Quit)
                         .unwrap();
-                    state.running = false;
-                    state.locked = false;
+                    self.state.running = false;
+                    self.state.locked = false;
                 }
             }
         }
+
+        Ok(())
     }
 
-    // event_queue.roundtrip(&mut state).unwrap();
-
-    Ok(())
+    pub fn is_running(&self) -> bool {
+        self.state.running
+    }
 }
 
 // TODO: Support multiple outputs
