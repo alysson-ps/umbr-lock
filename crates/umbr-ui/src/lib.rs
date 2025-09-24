@@ -22,14 +22,15 @@ pub mod win;
 pub fn mount_ui(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<()> {
     let (w, h) = wait_configure_and_render(&receiver)?;
 
-    let pixels = convert_to_pixels(w, h);
+    let pixbuf = convert_to_pixels(w, h);
 
     sender
         .send(UiMessage::Render {
-            width: w as i32,
-            height: h as i32,
-            stride: (w * 4) as i32,
-            pixels,
+            width: pixbuf.width,
+            height: pixbuf.height,
+            stride: pixbuf.stride,
+            n_channels: pixbuf.n_channels,
+            pixels: pixbuf.pixels,
         })
         .unwrap();
 
@@ -103,11 +104,20 @@ fn wait_configure_and_render(receiver: &Receiver<WindowingMessage>) -> Anyresult
     Ok((width, height))
 }
 
-fn convert_to_pixels(width: u32, height: u32) -> Vec<u8> {
+struct PixbufSnapshot {
+    pixels: Vec<u8>,
+    width: i32,
+    height: i32,
+    stride: i32,
+    n_channels: i32,
+}
+
+fn convert_to_pixels(width: u32, height: u32) -> PixbufSnapshot {
     gtk::init().expect("Failed to initialize GTK.");
 
     // 1. Crie o OffscreenWindow
     let offscreen = OffscreenWindow::new();
+    offscreen.set_default_size(width as i32, height as i32);
 
     // 2. Monte sua interface normalmente
     let vbox = GtkBox::new(Orientation::Vertical, 10);
@@ -128,5 +138,17 @@ fn convert_to_pixels(width: u32, height: u32) -> Vec<u8> {
 
     let buffer = offscreen.get_pixbuf().unwrap();
 
-    unsafe { buffer.get_pixels().to_vec() }
+    let width = buffer.width();
+    let height = buffer.height();
+    let stride = buffer.rowstride();
+    let n_channels = buffer.n_channels();
+    let pixels = unsafe { buffer.get_pixels().to_vec() };
+
+    PixbufSnapshot {
+        pixels,
+        width,
+        height,
+        stride,
+        n_channels,
+    }
 }

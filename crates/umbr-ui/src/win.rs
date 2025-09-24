@@ -1,4 +1,3 @@
-use memmap2::MmapMut;
 use smithay_client_toolkit::{
     delegate_keyboard, delegate_pointer, delegate_registry, delegate_seat, delegate_shm,
     reexports::client::Connection,
@@ -15,6 +14,7 @@ use smithay_client_toolkit::{
     },
 };
 use std::{
+    convert::TryFrom,
     sync::mpsc::{Receiver, Sender},
     thread,
 };
@@ -100,14 +100,11 @@ pub fn windowing_thread(
                     width,
                     height,
                     stride,
+                    n_channels,
                     pixels,
                 } => {
                     dbg!("Entrou aqui");
-                    state.render(
-                        &pixels,
-                        width as u32,
-                        height as u32,
-                    );
+                    state.render(&pixels, width, height, stride, n_channels);
                 }
 
                 //  render(
@@ -207,55 +204,132 @@ impl AppData {
         }
     }
 
-    fn render(&mut self, pixels: &[u8], width: u32, height: u32) {
-        let bpp = 4 as usize;
-        let dst_stride = width * (bpp as u32);
-        let src_stride = width * (bpp as u32);
-        let size = (dst_stride * height) as usize;
+    fn render(&mut self, pixels: &[u8], width: i32, height: i32, stride: i32, n_channels: i32) {
+        if width <= 0 || height <= 0 {
+            eprintln!("Invalid pixbuf dimensions: {}x{}", width, height);
+            return;
+        }
+
+        if stride <= 0 {
+            eprintln!("Invalid pixbuf stride: {}", stride);
+            return;
+        }
+
+        if !(n_channels == 3 || n_channels == 4) {
+            eprintln!("Unsupported channel count: {}", n_channels);
+            return;
+        }
+
+        let width_u32 = width as u32;
+        let height_u32 = height as u32;
+        let height_usize = height_u32 as usize;
+
+        let stride_usize = stride as usize;
+        let expected_len = match stride_usize.checked_mul(height_usize) {
+            Some(len) => len,
+            None => {
+                eprintln!(
+                    "Overflow calculating expected pixel buffer length: stride={} height={}",
+                    stride, height
+                );
+                return;
+            }
+        };
+
+        if pixels.len() != expected_len {
+            eprintln!(
+                "Unexpected pixel buffer length: expected {}, got {}",
+                expected_len,
+                pixels.len()
+            );
+            return;
+        }
+
+        let channels_usize = n_channels as usize;
+        let row_bytes = match (width_u32 as usize).checked_mul(channels_usize) {
+            Some(bytes) => bytes,
+            None => {
+                eprintln!(
+                    "Overflow calculating row byte count: width={} channels={}",
+                    width, n_channels
+                );
+                return;
+            }
+        };
+
+        if row_bytes > stride_usize {
+            eprintln!(
+                "Row byte count ({}) exceeds stride ({}).",
+                row_bytes, stride_usize
+            );
+            return;
+        }
+
+        let dst_stride_usize = match (width_u32 as usize).checked_mul(4) {
+            Some(bytes) => bytes,
+            None => {
+                eprintln!(
+                    "Overflow calculating destination stride for width {}",
+                    width
+                );
+                return;
+            }
+        };
+
+        let buffer_size = match dst_stride_usize.checked_mul(height_usize) {
+            Some(size) => size,
+            None => {
+                eprintln!(
+                    "Overflow calculating buffer size: stride={} height={}",
+                    dst_stride_usize, height
+                );
+                return;
+            }
+        };
 
         // Cria o SlotPool/buffer do smithay-client-toolkit
-        let mut pool = SlotPool::new(size, &self.shm_state).expect("Failed to create slot pool");
-        let (wlbuf, canvas) = pool
-            .create_buffer(
-                width as i32,
-                height as i32,
-                dst_stride as i32,
-                wl_shm::Format::Argb8888,
-            )
+        let mut pool =
+            SlotPool::new(buffer_size, &self.shm_state).expect("Failed to create slot pool");
+        let dst_stride_i32 = match i32::try_from(dst_stride_usize) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!(
+                    "Destination stride does not fit in i32: {}",
+                    dst_stride_usize
+                );
+                return;
+            }
+        };
+
+        let (wlbuf, mut canvas) = pool
+            .create_buffer(width, height, dst_stride_i32, wl_shm::Format::Argb8888)
             .expect("Failed to create buffer");
 
         dbg!("Canvas size: {}", canvas.len());
         dbg!("Pixels size: {}", pixels.len());
 
-        // Copia e converte RGBA -> ARGB8888 linha a linha
+        // Copia e converte para ARGB8888 linha a linha
+        let width_usize = width_u32 as usize;
+        for y in 0..height_usize {
+            let src_offset = y * stride_usize;
+            let dst_offset = y * dst_stride_usize;
+            let src_line = &pixels[src_offset..src_offset + row_bytes];
+            let dst_line = &mut canvas[dst_offset..dst_offset + dst_stride_usize];
 
-        {
-            for y in 0..height as usize {
-                let src_line =
-                    &pixels[(y * src_stride as usize)..(y * src_stride as usize + (width as usize * bpp))];
-                let dst_line = &mut canvas
-                    [(y * dst_stride as usize)..(y * dst_stride as usize + (width as usize * bpp))];
-
-                for x in 0..width as usize {
-                    let src = &src_line[x * bpp..x * bpp + 4];
-                    let mut dst = &mut dst_line[x * bpp..x * bpp + 4];
-                    // src: RGBA, dst: ARGB
-                    dst[0] = src[3]; // A
-                    dst[1] = src[0]; // R
-                    dst[2] = src[1]; // G
-                    dst[3] = src[2]; // B
-                }
+            for x in 0..width_usize {
+                let src = &src_line[x * channels_usize..x * channels_usize + channels_usize];
+                let dst = &mut dst_line[x * 4..x * 4 + 4];
+                // src: RGBA/RGB, dst: ARGB
+                let r = src[0];
+                let g = src[1];
+                let b = src[2];
+                let a = if channels_usize == 4 { src[3] } else { 255 };
+                dst[0] = a; // A
+                dst[1] = r; // R
+                dst[2] = g; // G
+                dst[3] = b; // B
             }
         }
-
-        // {
-        //     for pixel in canvas.chunks_exact_mut(4) {
-        //         pixel[0] = 255; // A
-        //         pixel[1] = 0; // R
-        //         pixel[2] = 255; // G
-        //         pixel[3] = 0; // B
-        //     }
-        // }
 
         println!("First 4 pixels: {:?}", &canvas[..16]);
 
@@ -263,8 +337,7 @@ impl AppData {
 
         self.wl_surface
             .attach(Some(&self.buffers.last().unwrap().0.wl_buffer()), 0, 0);
-        self.wl_surface
-            .damage_buffer(0, 0, width as i32, height as i32);
+        self.wl_surface.damage_buffer(0, 0, width, height);
         self.wl_surface.commit();
     }
 }
