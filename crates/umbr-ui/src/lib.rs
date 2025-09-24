@@ -1,123 +1,132 @@
 #![allow(warnings)]
-use cairo::RectangleInt;
-use gdk4::{Snapshot, Surface};
-use gsk4::Renderer;
+
+extern crate gdk;
+extern crate gtk;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::thread;
+
 use gtk::prelude::*;
-use gtk::{Application, ApplicationWindow};
-use gtk4::gdk::Display;
-use gtk4::gio::ApplicationFlags;
-use gtk4::{self as gtk, CssProvider, Widget};
-use std::collections::BTreeMap;
+use gtk::{Box as GtkBox, Button, Label, OffscreenWindow, Orientation};
+use smithay_client_toolkit::seat::keyboard::Keysym;
+use smithay_client_toolkit::shm::Shm;
+use smithay_client_toolkit::shm::slot::SlotPool;
+use umbr_core::{Anyresult, UmbrError};
+use wayland_client::protocol::wl_shm::{self, WlShm};
+use wayland_client::protocol::wl_surface::WlSurface;
 
-// use gtk4_layer_shell::{Edge, Layer, LayerShell};
-
-use uheex::types::{SExpr, Value};
-#[derive(Debug)]
-struct Element {
-    name: String,
-    attributes: BTreeMap<String, Value>,
-    children: Vec<SExpr>,
-}
+use self::types::{EventKeys, UiMessage, WindowingMessage};
 
 pub mod types;
 pub mod win;
 
-fn builder(layout: SExpr) -> Widget {
-    match layout {
-        SExpr::Element {
-            name,
-            attributes,
-            children,
-            ..
-        } => parser_element(Element {
-            name,
-            attributes,
-            children,
-        }),
-        SExpr::Text(v) => {
-            dbg!(&v);
-            gtk::Label::new(Some(format!("text {}", v).as_str())).upcast()
-        }
-        SExpr::Binding(v) => {
-            dbg!(&v);
-            gtk::Label::new(Some(format!("bind {}", v).as_str())).upcast()
+pub fn mount_ui(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<()> {
+    let (w, h) = wait_configure_and_render(&receiver)?;
+
+    let pixels = convert_to_pixels(w, h);
+
+    sender
+        .send(UiMessage::Render {
+            width: w as i32,
+            height: h as i32,
+            stride: (w * 4) as i32,
+            pixels,
+        })
+        .unwrap();
+
+    loop {
+        if receive_messages(&receiver, &sender).is_err() {
+            dbg!("Exiting mount_ui loop");
+            return Ok(());
         }
     }
+
+    Ok(())
 }
 
-fn parser_element(el: Element) -> Widget {
-    dbg!(&el);
-    match el.name.as_str() {
-        "Button" => {
-            let text = el.attributes.iter().collect::<Vec<_>>();
-
-            gtk::Button::new().upcast()
-        }
-        "Box" => {
-            let orientation = match el.attributes.get("direction").map(|v| match v {
-                Value::String(v) => v.as_str(),
-                _ => "",
-            }) {
-                Some("row") => gtk::Orientation::Horizontal,
-                _ => gtk::Orientation::Vertical,
-            };
-
-            let spacing = el.attributes.get("spacing").map(|v| match v {
-                Value::Number(v) => v,
-                _ => &8.0,
-            });
-
-            let container = gtk::Box::new(orientation, spacing.unwrap().round() as i32);
-
-            for chd in el.children {
-                container.append(builder(chd).downcast_ref::<Widget>().unwrap());
+fn handle_message(message: WindowingMessage, sender: &Sender<UiMessage>) -> Anyresult<()> {
+    dbg!("Received message:", &message);
+    match message {
+        WindowingMessage::GtkEvent(e) => match e {
+            EventKeys::Pressed { event } => {
+                dbg!("Key pressed:", &event);
+                if event.keysym == Keysym::Return {
+                    dbg!("Enter key pressed");
+                    sender
+                        .send(UiMessage::UnlockWithPassword {
+                            password: "test".into(),
+                        })
+                        .unwrap();
+                }
             }
-
-            container.upcast()
+            EventKeys::Released { event } => {
+                dbg!("Key released:", event);
+            }
+        },
+        WindowingMessage::UnlockFailed => {
+            dbg!("Unlock failed");
         }
-        "Label" => gtk::Label::new(Some(&el.name)).upcast(),
-        v => unimplemented!("{}", v.to_string()),
+        WindowingMessage::Quit => {
+            dbg!("Quitting windowing thread");
+            return Err(UmbrError::WindowingThreadQuit);
+        }
+        WindowingMessage::Ready { .. } => panic!("surface already configured"),
+    }
+    Ok(())
+}
+
+fn receive_messages(
+    receiver: &Receiver<WindowingMessage>,
+    sender: &Sender<UiMessage>,
+) -> Anyresult<()> {
+    loop {
+        let message = receiver.try_recv();
+        match message {
+            Ok(message) => handle_message(message, sender)?,
+            Err(TryRecvError::Empty) => {
+                // No message available, continue the loop
+                return Ok(());
+            }
+            Err(TryRecvError::Disconnected) => {
+                dbg!("Channel disconnected, exiting loop.");
+                return Err(UmbrError::WindowingThreadQuit);
+            }
+        }
     }
 }
 
-pub fn mount_ui(layout: SExpr) -> Option<Vec<u8>> {
-    if !gtk::is_initialized() {
-        gtk::init().expect("Failed to initialize GTK.");
+fn wait_configure_and_render(receiver: &Receiver<WindowingMessage>) -> Anyresult<(u32, u32)> {
+    let (width, height) = match receiver.recv().unwrap() {
+        WindowingMessage::Ready { width, height } => (width, height),
+        _ => panic!("Failed to receive render message"),
+    };
+
+    Ok((width, height))
+}
+
+fn convert_to_pixels(width: u32, height: u32) -> Vec<u8> {
+    gtk::init().expect("Failed to initialize GTK.");
+
+    // 1. Crie o OffscreenWindow
+    let offscreen = OffscreenWindow::new();
+
+    // 2. Monte sua interface normalmente
+    let vbox = GtkBox::new(Orientation::Vertical, 10);
+    let label = Label::new(Some("Olá, Locker!"));
+    let button = Button::with_label("Clique!");
+    vbox.pack_start(&label, false, false, 0);
+    vbox.pack_start(&button, false, false, 0);
+
+    offscreen.add(&vbox);
+
+    // 3. Mostre tudo (mesmo fora da tela)
+    offscreen.show_all();
+
+    // 4. Force o GTK a processar eventos para garantir o render
+    while gtk::events_pending() {
+        gtk::main_iteration();
     }
 
-    let display = Display::default().expect("Could not connect to a display.");
+    let buffer = offscreen.get_pixbuf().unwrap();
 
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.set_vexpand(true);
-    root.set_hexpand(true);
-
-    let center = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    center.set_halign(gtk::Align::Center);
-    center.set_valign(gtk::Align::Center);
-
-    let label = gtk::Label::new(Some("Hello, world!"));
-    center.append(&label);
-    root.append(&center);
-
-    root.realize();
-    root.measure(gtk4::Orientation::Horizontal, -1);
-    root.measure(gtk4::Orientation::Vertical, -1);
-    root.size_allocate(&gtk4::gdk::Rectangle::new(0, 0, 800, 600), -1);
-
-    let snapshot = gtk::Snapshot::new();
-    root.snapshot_child(&label, &snapshot);
-    let node = snapshot.to_node()?;
-
-    let rc = RectangleInt::new(0, 0, 800, 600);
-
-    let surface = Surface::new_toplevel(&display);
-    let renderer = Renderer::for_surface(&surface).unwrap();
-    // let rect = gtk4::cairo::Region::create_rectangle(&rc);
-    let viewport = graphene::Rect::new(0.0, 0.0, 800 as f32, 600 as f32);
-    let texture = renderer.render_texture(&node, Some(&viewport));
-
-    let stride = (800 * 4) as usize;
-    let mut rgba = vec![0u8; stride * 600 as usize];
-    texture.download(rgba.as_mut_slice(), stride);
-    Some(rgba)
+    unsafe { buffer.get_pixels().to_vec() }
 }

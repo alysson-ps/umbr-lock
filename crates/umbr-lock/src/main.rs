@@ -37,48 +37,42 @@ const SRC: &str = r#"
 fn main() -> Anyresult<()> {
     let args = Args::parse();
 
-    dbg!(&args);
-
     if args.preview {
         let (sender_to_render, receiver_from_windowing) =
             mpsc::channel::<umbr_ui::types::WindowingMessage>();
         let (sender_to_windowing, receiver_from_render) =
             mpsc::channel::<umbr_ui::types::UiMessage>();
 
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             if umbr_ui::win::windowing_thread(sender_to_render.clone(), receiver_from_render)
                 .is_err()
             {
-                println!("aqui");
                 sender_to_render
                     .send(umbr_ui::types::WindowingMessage::Quit)
                     .unwrap();
             }
         });
 
-        thread::sleep(Duration::from_secs(5));
+        if let Some(_ast) = parser(SRC) {
+            let _ = umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing);
 
-        sender_to_windowing
-            .send(umbr_ui::types::UiMessage::UnlockWithPassword {
-                password: "test".into(),
-            })
-            .unwrap();
-
-        if let Some(ast) = parser(SRC) {
-            umbr_ui::mount_ui(ast);
+            // sender_to_windowing
+            //     .send(umbr_ui::types::UiMessage::Render {
+            //         width: w,
+            //         height: h,
+            //         stride: s,
+            //         pixels,
+            //     })
+            //     .unwrap();
         }
 
-        loop {
-            if let Ok(msg) = receiver_from_windowing.try_recv() {
-                match msg {
-                    umbr_ui::types::WindowingMessage::Quit => {
-                        return Err(umbr_core::UmbrError::WindowingThreadQuit);
-                    }
-                    _ => {}
-                }
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
+        // thread::sleep(Duration::from_secs(2));
+
+        // sender_to_windowing
+        //     .send(umbr_ui::types::UiMessage::UnlockWithPassword {
+        //         password: "test".into(),
+        //     })
+        //     .unwrap();
     }
 
     Ok(())

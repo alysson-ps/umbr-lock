@@ -1,3 +1,4 @@
+use memmap2::MmapMut;
 use smithay_client_toolkit::{
     delegate_keyboard, delegate_pointer, delegate_registry, delegate_seat, delegate_shm,
     reexports::client::Connection,
@@ -6,72 +7,47 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerHandler},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
     },
     shm::{
         self, Shm, ShmHandler,
         slot::{Buffer, SlotPool},
     },
 };
-use std::sync::mpsc::{Receiver, Sender};
+use std::{
+    sync::mpsc::{Receiver, Sender},
+    thread,
+};
 use wayland_client::{
     Dispatch, Proxy, QueueHandle, delegate_noop,
     globals::registry_queue_init,
     protocol::{
-        wl_buffer,
+        wl_buffer::{self, WlBuffer},
         wl_callback::{self, WlCallback},
-        wl_compositor, wl_display, wl_keyboard, wl_output, wl_pointer, wl_seat,
+        wl_compositor, wl_display,
+        wl_keyboard::{self, WlKeyboard},
+        wl_output, wl_pointer, wl_seat,
         wl_shm::{self, WlShm},
+        wl_shm_pool::WlShmPool,
         wl_surface::{self, WlSurface},
         wl_touch,
     },
 };
 use wayland_protocols::ext::session_lock::v1::client::{
-    ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
+    ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
+    ext_session_lock_surface_v1, ext_session_lock_v1,
 };
 
-use crate::types::{UiMessage, WindowingMessage};
+use crate::types::{EventKeys, UiMessage, WindowingMessage};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-fn paint_green(shm: &Shm, surface: &WlSurface, width: u32, height: u32) {
-    let stride = width * 4;
-    let size = (stride * height) as usize;
-
-    let mut pool = SlotPool::new(size, shm).expect("Failed to create slot pool");
-    let (wlbuf, canvas) = pool
-        .create_buffer(
-            width as i32,
-            height as i32,
-            stride as i32,
-            wl_shm::Format::Argb8888,
-        )
-        .expect("Failed to create buffer");
-
-    {
-        let canvas = canvas.as_mut();
-        for chunk in canvas.chunks_exact_mut(4) {
-            chunk[0] = 0; // B
-            chunk[1] = 255; // G
-            chunk[2] = 0; // R
-            chunk[3] = 255; // A
-        }
-    }
-
-    surface.attach(Some(&wlbuf.wl_buffer()), 0, 0);
-    surface.damage_buffer(0, 0, width as i32, height as i32);
-    surface.commit();
-}
 
 pub fn windowing_thread(
     sender: Sender<WindowingMessage>,
     receiver: Receiver<UiMessage>,
 ) -> Result<()> {
     let conn = match Connection::connect_to_env() {
-        Ok(conn) => {
-            dbg!(&conn);
-            conn
-        }
+        Ok(conn) => conn,
         Err(e) => {
             dbg!(&e);
             eprintln!("Wayland connect failed: {e:?}");
@@ -98,8 +74,6 @@ pub fn windowing_thread(
     let session_lock = session_lock_manager.lock(&qh, ());
     // set surface role as session lock surface
     session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
-
-
     let (width, height) = (800, 600);
 
     // paint_green(&shm_state, &wl_surface, width, height);
@@ -114,7 +88,7 @@ pub fn windowing_thread(
         SeatState::new(&globals, &qh),
         sender,
     );
-    
+
     event_queue.roundtrip(&mut state)?;
 
     while state.running {
@@ -122,12 +96,31 @@ pub fn windowing_thread(
 
         while let Ok(message) = receiver.try_recv() {
             match message {
+                UiMessage::Render {
+                    width,
+                    height,
+                    stride,
+                    pixels,
+                } => {
+                    dbg!("Entrou aqui");
+                    state.render(
+                        &pixels,
+                        width as u32,
+                        height as u32,
+                    );
+                }
+
+                //  render(
+                //     &state.shm_state,
+                //     &state.wl_surface,
+                //     width.try_into().unwrap(),
+                //     height.try_into().unwrap(),
+                //     stride.try_into().unwrap(),
+                //     &pixels,
+                // ),
                 UiMessage::UnlockWithPassword { password } => {
                     dbg!(&password);
-                    state
-                        .render_thread_sender
-                        .send(WindowingMessage::Quit)
-                        .unwrap();
+                    state.session_lock.unlock_and_destroy();
 
                     state.wl_surface.attach(None, 0, 0);
                     state
@@ -135,12 +128,17 @@ pub fn windowing_thread(
                         .damage_buffer(0, 0, width as i32, height as i32);
                     state.wl_surface.commit();
 
-                    state.session_lock.unlock_and_destroy();
-                    event_queue.dispatch_pending(&mut state)?;
-                    event_queue.flush()?;
-                    event_queue.roundtrip(&mut state)?;
+                    event_queue.roundtrip(&mut state).unwrap();
+
+                    event_queue.dispatch_pending(&mut state).unwrap();
+                    event_queue.flush().unwrap();
                     // state.
+                    state
+                        .render_thread_sender
+                        .send(WindowingMessage::Quit)
+                        .unwrap();
                     state.running = false;
+                    state.locked = false;
                 }
             }
         }
@@ -161,6 +159,7 @@ struct AppData {
 
     width: u32,
     height: u32,
+    buffers: Vec<(Buffer, SlotPool)>,
 
     registry_state: RegistryState,
     wl_surface: wl_surface::WlSurface,
@@ -200,18 +199,80 @@ impl AppData {
             wl_display: display,
             shm_state: shm,
             seat_state,
+            buffers: Vec::new(),
             keyboard: None,
             pointer: None,
             touch: None,
             render_thread_sender: sender,
         }
     }
+
+    fn render(&mut self, pixels: &[u8], width: u32, height: u32) {
+        let bpp = 4 as usize;
+        let dst_stride = width * (bpp as u32);
+        let src_stride = width * (bpp as u32);
+        let size = (dst_stride * height) as usize;
+
+        // Cria o SlotPool/buffer do smithay-client-toolkit
+        let mut pool = SlotPool::new(size, &self.shm_state).expect("Failed to create slot pool");
+        let (wlbuf, canvas) = pool
+            .create_buffer(
+                width as i32,
+                height as i32,
+                dst_stride as i32,
+                wl_shm::Format::Argb8888,
+            )
+            .expect("Failed to create buffer");
+
+        dbg!("Canvas size: {}", canvas.len());
+        dbg!("Pixels size: {}", pixels.len());
+
+        // Copia e converte RGBA -> ARGB8888 linha a linha
+
+        {
+            for y in 0..height as usize {
+                let src_line =
+                    &pixels[(y * src_stride as usize)..(y * src_stride as usize + (width as usize * bpp))];
+                let dst_line = &mut canvas
+                    [(y * dst_stride as usize)..(y * dst_stride as usize + (width as usize * bpp))];
+
+                for x in 0..width as usize {
+                    let src = &src_line[x * bpp..x * bpp + 4];
+                    let mut dst = &mut dst_line[x * bpp..x * bpp + 4];
+                    // src: RGBA, dst: ARGB
+                    dst[0] = src[3]; // A
+                    dst[1] = src[0]; // R
+                    dst[2] = src[1]; // G
+                    dst[3] = src[2]; // B
+                }
+            }
+        }
+
+        // {
+        //     for pixel in canvas.chunks_exact_mut(4) {
+        //         pixel[0] = 255; // A
+        //         pixel[1] = 0; // R
+        //         pixel[2] = 255; // G
+        //         pixel[3] = 0; // B
+        //     }
+        // }
+
+        println!("First 4 pixels: {:?}", &canvas[..16]);
+
+        self.buffers.push((wlbuf, pool));
+
+        self.wl_surface
+            .attach(Some(&self.buffers.last().unwrap().0.wl_buffer()), 0, 0);
+        self.wl_surface
+            .damage_buffer(0, 0, width as i32, height as i32);
+        self.wl_surface.commit();
+    }
 }
 
 // Ignore events from these object types
 delegate_noop!(AppData: ignore wl_compositor::WlCompositor);
 delegate_noop!(AppData: ignore wl_surface::WlSurface);
-delegate_noop!(AppData: ignore wl_buffer::WlBuffer);
+// delegate_noop!(AppData: ignore wl_buffer::WlBuffer);
 delegate_noop!(AppData: ignore wl_output::WlOutput);
 delegate_noop!(AppData: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1);
 // Delegate input
@@ -220,6 +281,27 @@ delegate_keyboard!(AppData);
 delegate_pointer!(AppData);
 delegate_registry!(AppData);
 delegate_shm!(AppData);
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        buffer: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        dbg!(&event);
+        match event {
+            wl_buffer::Event::Release => {
+                // Handle buffer release
+                state.buffers.retain(|(b, _)| b.wl_buffer() != buffer);
+                dbg!("Buffer released and removed from tracking.");
+            }
+            _ => {}
+        }
+    }
+}
 
 impl ShmHandler for AppData {
     fn shm_state(&mut self) -> &mut Shm {
@@ -302,15 +384,48 @@ impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for AppD
 
             let sender = &state.render_thread_sender;
             if !state.configured {
-                sender
-                    .send(WindowingMessage::SurfaceReady {
-                        display_id: state.wl_display.id(),
-                        surface_id: state.wl_surface.id(),
-                        size: (width, height),
-                    })
-                    .unwrap();
+                // sender
+                //     .send(WindowingMessage::SurfaceReady {
+                //         display_id: state.wl_display.id(),
+                //         surface_id: state.wl_surface.id(),
+                //         size: (width, height),
+                //     })
+                //     .unwrap();
+
+                // Render vermelho aqui para testar!
                 state.configured = true;
                 surface.ack_configure(serial);
+
+                let mut pool =
+                    SlotPool::new(((width * 4) * height) as usize, &state.shm_state).unwrap(); // 1x1 pixel
+                let (wlbuf, canvas) = pool
+                    .create_buffer(
+                        width as i32,
+                        height as i32,
+                        (width * 4) as i32,
+                        wl_shm::Format::Argb8888,
+                    )
+                    .unwrap();
+                canvas[0] = 255; // A
+                canvas[1] = 255; // R
+                canvas[2] = 0; // G
+                canvas[3] = 0; // B
+                state.wl_surface.attach(Some(&wlbuf.wl_buffer()), 0, 0);
+                state.wl_surface.damage_buffer(0, 0, 1, 1);
+                state.wl_surface.commit();
+
+                sender
+                    .send(WindowingMessage::Ready { width, height })
+                    .unwrap();
+
+                // render(
+                //     &state.shm_state.wl_shm(),
+                //     &state.wl_surface,
+                //     width,
+                //     height,
+                //     width * 4,
+                //     &vec![0; (width * height * 4) as usize], // pixels dummy
+                // );
             }
         }
     }
@@ -384,6 +499,7 @@ impl KeyboardHandler for AppData {
         _: &[u32],
         _keysyms: &[Keysym],
     ) {
+        dbg!("Keyboard focus on our surface");
     }
 
     fn leave(
@@ -404,6 +520,15 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
+        dbg!(&event);
+        match event.keysym {
+            Keysym::Return => {
+                self.render_thread_sender
+                    .send(WindowingMessage::GtkEvent(EventKeys::Pressed { event }))
+                    .unwrap();
+            }
+            _ => {}
+        }
         // if let Some(text) = sctk_key_event_to_slint(event) {
         //     self.render_thread_sender
         //         .send(WindowingMessage::SlintWindowEvent(
@@ -421,6 +546,15 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
+        dbg!(&event);
+        match event.keysym {
+            Keysym::Return => {
+                self.render_thread_sender
+                    .send(WindowingMessage::GtkEvent(EventKeys::Released { event }))
+                    .unwrap();
+            }
+            _ => {}
+        }
         // if let Some(text) = sctk_key_event_to_slint(event) {
         //     self.render_thread_sender
         //         .send(WindowingMessage::SlintWindowEvent(
@@ -448,7 +582,7 @@ impl PointerHandler for AppData {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _pointer: &wl_pointer::WlPointer,
-        _events: &[PointerEvent],
+        events: &[PointerEvent],
     ) {
     }
 }
