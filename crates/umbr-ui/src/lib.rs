@@ -3,7 +3,6 @@
 extern crate gdk;
 extern crate gtk;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::thread;
 
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Label, OffscreenWindow, Orientation};
@@ -19,32 +18,70 @@ use self::types::{EventKeys, UiMessage, WindowingMessage};
 pub mod types;
 pub mod win;
 
-pub fn mount_ui(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<()> {
-    let (w, h) = wait_configure_and_render(&receiver)?;
+pub struct UiRuntime {
+    sender: Sender<UiMessage>,
+    receiver: Receiver<WindowingMessage>,
+    running: bool,
+}
 
-    let pixbuf = convert_to_pixels(w, h);
+impl UiRuntime {
+    pub fn new(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<Self> {
+        let (w, h) = wait_configure_and_render(&receiver)?;
 
-    sender
-        .send(UiMessage::Render {
-            width: pixbuf.width,
-            height: pixbuf.height,
-            stride: pixbuf.stride,
-            n_channels: pixbuf.n_channels,
-            pixels: pixbuf.pixels,
+        let pixbuf = convert_to_pixels(w, h);
+
+        sender
+            .send(UiMessage::Render {
+                width: pixbuf.width,
+                height: pixbuf.height,
+                stride: pixbuf.stride,
+                n_channels: pixbuf.n_channels,
+                pixels: pixbuf.pixels,
+            })
+            .unwrap();
+
+        Ok(Self {
+            sender,
+            receiver,
+            running: true,
         })
-        .unwrap();
+    }
 
-    loop {
-        if receive_messages(&receiver, &sender).is_err() {
-            dbg!("Exiting mount_ui loop");
+    pub fn process_messages(&mut self) -> Anyresult<()> {
+        if !self.running {
             return Ok(());
+        }
+
+        match receive_messages(&self.receiver, &self.sender)? {
+            MessageLoopState::Continue => Ok(()),
+            MessageLoopState::Stop => {
+                self.running = false;
+                Ok(())
+            }
         }
     }
 
-    Ok(())
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
 }
 
-fn handle_message(message: WindowingMessage, sender: &Sender<UiMessage>) -> Anyresult<()> {
+pub fn mount_ui(
+    sender: Sender<UiMessage>,
+    receiver: Receiver<WindowingMessage>,
+) -> Anyresult<UiRuntime> {
+    UiRuntime::new(sender, receiver)
+}
+
+enum MessageLoopState {
+    Continue,
+    Stop,
+}
+
+fn handle_message(
+    message: WindowingMessage,
+    sender: &Sender<UiMessage>,
+) -> Anyresult<MessageLoopState> {
     dbg!("Received message:", &message);
     match message {
         WindowingMessage::GtkEvent(e) => match e {
@@ -68,24 +105,28 @@ fn handle_message(message: WindowingMessage, sender: &Sender<UiMessage>) -> Anyr
         }
         WindowingMessage::Quit => {
             dbg!("Quitting windowing thread");
-            return Err(UmbrError::WindowingThreadQuit);
+            return Ok(MessageLoopState::Stop);
         }
         WindowingMessage::Ready { .. } => panic!("surface already configured"),
     }
-    Ok(())
+    Ok(MessageLoopState::Continue)
 }
 
 fn receive_messages(
     receiver: &Receiver<WindowingMessage>,
     sender: &Sender<UiMessage>,
-) -> Anyresult<()> {
+) -> Anyresult<MessageLoopState> {
     loop {
         let message = receiver.try_recv();
         match message {
-            Ok(message) => handle_message(message, sender)?,
+            Ok(message) => {
+                if let MessageLoopState::Stop = handle_message(message, sender)? {
+                    return Ok(MessageLoopState::Stop);
+                }
+            }
             Err(TryRecvError::Empty) => {
                 // No message available, continue the loop
-                return Ok(());
+                return Ok(MessageLoopState::Continue);
             }
             Err(TryRecvError::Disconnected) => {
                 dbg!("Channel disconnected, exiting loop.");
