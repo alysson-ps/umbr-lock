@@ -5,10 +5,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 #[derive(Debug)]
 pub enum WindowingMessage {
     GtkEvent(EventKeys),
-    Ready {
-        width: u32,
-        height: u32,
-    },
+    Ready { width: u32, height: u32 },
     UnlockFailed,
     Quit,
 }
@@ -27,6 +24,7 @@ pub enum UiMessage {
         width: i32,
         height: i32,
         stride: i32,
+        channels: i32,
         pixels: Vec<u8>,
     },
 }

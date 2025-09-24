@@ -100,14 +100,11 @@ pub fn windowing_thread(
                     width,
                     height,
                     stride,
+                    channels,
                     pixels,
                 } => {
                     dbg!("Entrou aqui");
-                    state.render(
-                        &pixels,
-                        width as u32,
-                        height as u32,
-                    );
+                    state.render(&pixels, width as u32, height as u32, stride, channels);
                 }
 
                 //  render(
@@ -207,11 +204,21 @@ impl AppData {
         }
     }
 
-    fn render(&mut self, pixels: &[u8], width: u32, height: u32) {
-        let bpp = 4 as usize;
-        let dst_stride = width * (bpp as u32);
-        let src_stride = width * (bpp as u32);
-        let size = (dst_stride * height) as usize;
+    fn render(&mut self, pixels: &[u8], width: u32, height: u32, src_stride: i32, channels: i32) {
+        let dst_channels = 4usize;
+        let channels = channels.max(0) as usize;
+        if channels == 0 {
+            dbg!("Pixbuf reported zero channels; skipping render");
+            return;
+        }
+
+        let src_stride = if src_stride > 0 {
+            src_stride as usize
+        } else {
+            width as usize * channels
+        };
+        let dst_stride = width as usize * dst_channels;
+        let size = dst_stride * height as usize;
 
         // Cria o SlotPool/buffer do smithay-client-toolkit
         let mut pool = SlotPool::new(size, &self.shm_state).expect("Failed to create slot pool");
@@ -224,40 +231,74 @@ impl AppData {
             )
             .expect("Failed to create buffer");
 
-        dbg!("Canvas size: {}", canvas.len());
-        dbg!("Pixels size: {}", pixels.len());
+        dbg!(("Canvas size", canvas.len()));
+        dbg!(("Pixels size", pixels.len()));
+        dbg!(("Source stride", src_stride));
+        dbg!(("Channels", channels));
 
-        // Copia e converte RGBA -> ARGB8888 linha a linha
+        for y in 0..height as usize {
+            let src_row_start = y * src_stride;
+            if src_row_start >= pixels.len() {
+                break;
+            }
+            let src_row_end = (src_row_start + src_stride).min(pixels.len());
+            let src_row = &pixels[src_row_start..src_row_end];
 
-        {
-            for y in 0..height as usize {
-                let src_line =
-                    &pixels[(y * src_stride as usize)..(y * src_stride as usize + (width as usize * bpp))];
-                let dst_line = &mut canvas
-                    [(y * dst_stride as usize)..(y * dst_stride as usize + (width as usize * bpp))];
+            let dst_row_start = y * dst_stride;
+            let dst_row_end = dst_row_start + dst_stride;
+            let dst_row = &mut canvas[dst_row_start..dst_row_end];
+            dst_row.fill(0);
 
-                for x in 0..width as usize {
-                    let src = &src_line[x * bpp..x * bpp + 4];
-                    let mut dst = &mut dst_line[x * bpp..x * bpp + 4];
-                    // src: RGBA, dst: ARGB
-                    dst[0] = src[3]; // A
-                    dst[1] = src[0]; // R
-                    dst[2] = src[1]; // G
-                    dst[3] = src[2]; // B
-                }
+            let max_pixels = std::cmp::min(width as usize, src_row.len() / channels);
+            for x in 0..max_pixels {
+                let src_idx = x * channels;
+                let dst_idx = x * dst_channels;
+                let dst_pixel = &mut dst_row[dst_idx..dst_idx + dst_channels];
+
+                let (r, g, b, a) = match channels {
+                    4 => (
+                        src_row[src_idx],
+                        src_row[src_idx + 1],
+                        src_row[src_idx + 2],
+                        src_row[src_idx + 3],
+                    ),
+                    3 => (
+                        src_row[src_idx],
+                        src_row[src_idx + 1],
+                        src_row[src_idx + 2],
+                        0xFF,
+                    ),
+                    _ => {
+                        let mut r = 0;
+                        let mut g = 0;
+                        let mut b = 0;
+                        let mut a = 0xFF;
+                        if channels > 0 {
+                            r = src_row[src_idx];
+                        }
+                        if channels > 1 {
+                            g = src_row[src_idx + 1];
+                        }
+                        if channels > 2 {
+                            b = src_row[src_idx + 2];
+                        }
+                        if channels > 3 {
+                            a = src_row[src_idx + 3];
+                        }
+                        (r, g, b, a)
+                    }
+                };
+
+                dst_pixel[0] = a;
+                dst_pixel[1] = r;
+                dst_pixel[2] = g;
+                dst_pixel[3] = b;
             }
         }
 
-        // {
-        //     for pixel in canvas.chunks_exact_mut(4) {
-        //         pixel[0] = 255; // A
-        //         pixel[1] = 0; // R
-        //         pixel[2] = 255; // G
-        //         pixel[3] = 0; // B
-        //     }
-        // }
-
-        println!("First 4 pixels: {:?}", &canvas[..16]);
+        if canvas.len() >= 16 {
+            println!("First 4 pixels: {:?}", &canvas[..16]);
+        }
 
         self.buffers.push((wlbuf, pool));
 

@@ -22,13 +22,14 @@ pub mod win;
 pub fn mount_ui(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<()> {
     let (w, h) = wait_configure_and_render(&receiver)?;
 
-    let pixels = convert_to_pixels(w, h);
+    let (pixels, stride, channels) = convert_to_pixels(w, h);
 
     sender
         .send(UiMessage::Render {
             width: w as i32,
             height: h as i32,
-            stride: (w * 4) as i32,
+            stride,
+            channels,
             pixels,
         })
         .unwrap();
@@ -103,7 +104,7 @@ fn wait_configure_and_render(receiver: &Receiver<WindowingMessage>) -> Anyresult
     Ok((width, height))
 }
 
-fn convert_to_pixels(width: u32, height: u32) -> Vec<u8> {
+fn convert_to_pixels(width: u32, height: u32) -> (Vec<u8>, i32, i32) {
     gtk::init().expect("Failed to initialize GTK.");
 
     // 1. Crie o OffscreenWindow
@@ -127,6 +128,10 @@ fn convert_to_pixels(width: u32, height: u32) -> Vec<u8> {
     }
 
     let buffer = offscreen.get_pixbuf().unwrap();
+    let stride = buffer.get_rowstride();
+    let channels = buffer.get_n_channels();
 
-    unsafe { buffer.get_pixels().to_vec() }
+    let pixels = unsafe { buffer.get_pixels().to_vec() };
+
+    (pixels, stride, channels)
 }
