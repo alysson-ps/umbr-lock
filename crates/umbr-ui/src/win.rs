@@ -1,5 +1,7 @@
+use gdk::keys::constants::m;
 use smithay_client_toolkit::{
-    delegate_keyboard, delegate_pointer, delegate_registry, delegate_seat, delegate_shm,
+    delegate_keyboard, delegate_layer, delegate_pointer, delegate_registry, delegate_seat,
+    delegate_shm,
     reexports::client::Connection,
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -8,6 +10,7 @@ use smithay_client_toolkit::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
     },
+    shell::wlr_layer::{LayerShell, LayerShellHandler},
     shm::{
         self, Shm, ShmHandler,
         slot::{Buffer, SlotPool},
@@ -32,9 +35,17 @@ use wayland_client::{
         wl_touch,
     },
 };
-use wayland_protocols::ext::session_lock::v1::client::{
-    ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
-    ext_session_lock_surface_v1, ext_session_lock_v1,
+use wayland_protocols::{
+    ext::session_lock::v1::client::{
+        ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
+        ext_session_lock_surface_v1,
+        ext_session_lock_v1::{self, ExtSessionLockV1},
+    },
+    xdg::shell::client::{
+        xdg_surface::{self, XdgSurface},
+        xdg_toplevel::{self, XdgToplevel},
+        xdg_wm_base::{self, XdgWmBase},
+    },
 };
 
 use crate::types::{EventKeys, UiMessage, WindowingMessage};
@@ -47,19 +58,27 @@ pub struct WindowingApp {
     receiver: Receiver<UiMessage>,
 }
 
+pub enum Mode {
+    Session {
+        lock: ext_session_lock_v1::ExtSessionLockV1,
+    },
+    Preview {
+        xdg_wm_base: XdgWmBase,
+        xdg_surface: XdgSurface,
+        xdg_toplevel: XdgToplevel,
+    },
+}
+
 impl WindowingApp {
     pub fn initialize(
         sender: Sender<WindowingMessage>,
         receiver: Receiver<UiMessage>,
+        is_preview: bool,
     ) -> Result<Self> {
         let conn = match Connection::connect_to_env() {
             Ok(conn) => conn,
             Err(e) => {
-                dbg!(&e);
-                eprintln!("Wayland connect failed: {e:?}");
-                eprintln!("WAYLAND_DISPLAY={:?}", std::env::var("WAYLAND_DISPLAY"));
-                eprintln!("XDG_RUNTIME_DIR={:?}", std::env::var("XDG_RUNTIME_DIR"));
-                panic!("erro");
+                panic!("Failed to connect to Wayland server: {}", e);
             }
         };
 
@@ -74,21 +93,48 @@ impl WindowingApp {
         let shm_state = Shm::bind(&globals, &qh).expect("wl_shm not available");
         let wl_surface = compositor.create_surface(&qh, ());
         let output: wl_output::WlOutput = globals.bind(&qh, 1..=1, ()).unwrap();
-        let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = globals
-            .bind(&qh, 1..=1, ())
-            .map_err(|_| {
-                "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
-            })?;
-        let session_lock = session_lock_manager.lock(&qh, ());
-        // set surface role as session lock surface
-        session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
+        let mode = if !is_preview {
+            // ---- modo Session Lock ----
+            let session_lock_manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 =
+            globals.bind(&qh, 1..=1, ())
+                .map_err(|_| {
+
+                    "Could not bind ext-session-lock-v1. Your compositor probably does not support this."
+                }
+                )?;
+            let session_lock = session_lock_manager.lock(&qh, ());
+            // define o papel da surface como lock surface
+            session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
+            Mode::Session { lock: session_lock }
+        } else {
+            // ---- modo Preview (janela normal) ----
+            let xdg_wm_base: XdgWmBase = globals
+                .bind(&qh, 1..=6, ())
+                .expect("xdg_wm_base not available");
+            let xdg_surface = xdg_wm_base.get_xdg_surface(&wl_surface, &qh, ());
+            let xdg_toplevel = xdg_surface.get_toplevel(&qh, ());
+            xdg_toplevel.set_title("Preview".to_string());
+            // dica: set_app_id se quiser integração com o compositor
+            // xdg_toplevel.set_app_id("meu.app.preview");
+
+            Mode::Preview {
+                xdg_wm_base,
+                xdg_surface,
+                xdg_toplevel,
+            }
+        };
 
         let state = AppData::new(
             conn,
             RegistryState::new(&globals),
             display,
             wl_surface.clone(),
-            session_lock,
+            if let Mode::Session { lock } = &mode {
+                Some(lock.clone())
+            } else {
+                None
+            },
+            mode,
             shm_state,
             SeatState::new(&globals, &qh),
             sender,
@@ -122,6 +168,7 @@ impl WindowingApp {
     }
 
     pub fn process_ui_messages(&mut self) -> Result<()> {
+        dbg!("Processing UI messages");
         while let Ok(message) = self.receiver.try_recv() {
             match message {
                 UiMessage::Render {
@@ -137,7 +184,9 @@ impl WindowingApp {
                 }
                 UiMessage::UnlockWithPassword { password } => {
                     dbg!(&password);
-                    self.state.session_lock.unlock_and_destroy();
+                    if let Some(session_lock) = &self.state.session_lock {
+                        session_lock.unlock_and_destroy();
+                    }
 
                     self.state.wl_surface.attach(None, 0, 0);
                     self.state.wl_surface.damage_buffer(
@@ -191,7 +240,8 @@ struct AppData {
     registry_state: RegistryState,
     wl_surface: wl_surface::WlSurface,
     wl_display: wl_display::WlDisplay,
-    session_lock: ext_session_lock_v1::ExtSessionLockV1,
+    session_lock: Option<ExtSessionLockV1>,
+    mode: Mode,
 
     shm_state: Shm,
     seat_state: SeatState,
@@ -208,7 +258,8 @@ impl AppData {
         registry_state: RegistryState,
         display: wl_display::WlDisplay,
         surface: wl_surface::WlSurface,
-        session_lock: ext_session_lock_v1::ExtSessionLockV1,
+        session_lock: Option<ExtSessionLockV1>,
+        mode: Mode,
         shm: Shm,
         seat_state: SeatState,
         sender: Sender<WindowingMessage>,
@@ -226,6 +277,7 @@ impl AppData {
             wl_display: display,
             shm_state: shm,
             seat_state,
+            mode,
             buffers: Vec::new(),
             keyboard: None,
             pointer: None,
@@ -384,6 +436,72 @@ delegate_keyboard!(AppData);
 delegate_pointer!(AppData);
 delegate_registry!(AppData);
 delegate_shm!(AppData);
+
+impl Dispatch<XdgToplevel, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, .. } = event {
+            // guarde a largura/altura vindas do configure, se precisar
+            state.width = width.max(0) as u32;
+            state.height = height.max(0) as u32;
+        }
+
+        if let xdg_toplevel::Event::Close = event {
+            state.running = false;
+        }
+    }
+}
+
+impl Dispatch<XdgWmBase, ()> for AppData {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_wm_base::XdgWmBase,
+        event: xdg_wm_base::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            proxy.pong(serial);
+        }
+    }
+}
+
+impl wayland_client::Dispatch<XdgSurface, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            // guarde a largura/altura vindas do configure do xdg_toplevel, se precisar
+
+            let xdg_surface = match &state.mode {
+                Mode::Preview { xdg_surface, .. } => xdg_surface,
+                _ => return,
+            };
+
+            xdg_surface.ack_configure(serial);
+
+            state
+                .render_thread_sender
+                .send(WindowingMessage::Ready {
+                    width: state.width,
+                    height: state.height,
+                })
+                .unwrap();
+        }
+    }
+}
 
 impl Dispatch<wl_buffer::WlBuffer, ()> for AppData {
     fn event(

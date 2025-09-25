@@ -1,7 +1,7 @@
 #![allow(warnings)]
 
-extern crate gdk;
-extern crate gtk;
+// extern crate gdk;
+// extern crate gtk;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gtk::prelude::*;

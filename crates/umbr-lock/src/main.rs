@@ -35,44 +35,44 @@ const SRC: &str = r#"
 fn main() -> Anyresult<()> {
     let args = Args::parse();
 
-    if args.preview {
-        let (sender_to_render, receiver_from_windowing) =
-            mpsc::channel::<umbr_ui::types::WindowingMessage>();
-        let (sender_to_windowing, receiver_from_render) =
-            mpsc::channel::<umbr_ui::types::UiMessage>();
+    let (sender_to_render, receiver_from_windowing) =
+        mpsc::channel::<umbr_ui::types::WindowingMessage>();
+    let (sender_to_windowing, receiver_from_render) = mpsc::channel::<umbr_ui::types::UiMessage>();
 
-        let mut windowing =
-            umbr_ui::win::WindowingApp::initialize(sender_to_render.clone(), receiver_from_render)
-                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+    let mut windowing = umbr_ui::win::WindowingApp::initialize(
+        sender_to_render.clone(),
+        receiver_from_render,
+        args.preview,
+    )
+    .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+    windowing
+        .initial_roundtrip()
+        .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+    if let Some(_ast) = parser(SRC) {
+        let mut ui_runtime =
+            umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing)?;
 
         windowing
-            .initial_roundtrip()
+            .process_ui_messages()
             .map_err(|err| UmbrError::Generic(err.to_string()))?;
 
-        if let Some(_ast) = parser(SRC) {
-            let mut ui_runtime =
-                umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing)?;
-
+        while windowing.is_running() && ui_runtime.is_running() {
+            ui_runtime.process_messages()?;
             windowing
-                .process_ui_messages()
+                .dispatch_blocking()
                 .map_err(|err| UmbrError::Generic(err.to_string()))?;
-
-            while windowing.is_running() && ui_runtime.is_running() {
-                ui_runtime.process_messages()?;
-                windowing
-                    .dispatch_blocking()
-                    .map_err(|err| UmbrError::Generic(err.to_string()))?;
-            }
         }
-
-        // thread::sleep(Duration::from_secs(2));
-
-        // sender_to_windowing
-        //     .send(umbr_ui::types::UiMessage::UnlockWithPassword {
-        //         password: "test".into(),
-        //     })
-        //     .unwrap();
     }
+
+    // thread::sleep(Duration::from_secs(2));
+
+    // sender_to_windowing
+    //     .send(umbr_ui::types::UiMessage::UnlockWithPassword {
+    //         password: "test".into(),
+    //     })
+    //     .unwrap();
 
     Ok(())
 }
