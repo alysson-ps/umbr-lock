@@ -1,0 +1,72 @@
+;; Globals Variables
+(declare
+    (variable :name 'dot' ('•'))
+    (variable :name 'username' $('whoami'))
+    (variable :name 'time' :interval '60s' $('date +%H:%M'))
+)
+
+;; Layout
+(window :monitor 0 
+    (column :class 'container'
+        ;; Time
+        (label :class 'time' (&time))
+
+        ;; Username
+        (label :class 'username' (&username))
+
+        ;; Dots
+        (then :cond (&count > 0) 
+            (row :class 'dots' :spacing 8
+                (repeat :times &count
+                    (label :class 'dot' (&dot))
+                )
+            )
+        )
+    )
+)
+
+;; Styles
+(stylesheet
+    ;; Keyword not working
+    (test 
+        :bg '#222222'
+        :padding 12
+    )
+    (.container 
+        :padding 12
+        :bg '#333333'
+    )
+    (.time 
+        :align 'center'
+        (font
+            :size 48
+            :color '#FFFFFF'
+            :weight 'bold'
+            :family 'monospace'
+        )
+        (padding 
+            :bottom 8
+        )
+    )
+    (.username 
+        :align 'center'
+        (font 
+            :size 24
+            :color '#AAAAAA'
+            :family 'monospace'
+        )
+        (padding 
+            :bottom 8
+        )
+    )
+    (.dots 
+        :align 'center'
+    )
+    (.dot 
+        (font
+            :color '#FFFFFF'
+            :size 16
+            :family 'monospace'
+        )
+    )
+)
