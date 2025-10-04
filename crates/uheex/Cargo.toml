@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["runtime"]   # se quiser, runtime vem por padrão
-runtime = []            # feature opcional
+default = ["runtime"]
+serde = ["dep:serde", "dep:serde_json"]
+runtime = []
 
 [dependencies]
 logos = "0.15.1"
 chumsky = "0.10.1"
 ariadne = "0.5.1"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }

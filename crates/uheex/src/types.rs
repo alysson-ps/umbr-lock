@@ -1,8 +1,12 @@
 use core::fmt;
-use std::str::FromStr;
 use logos::Logos;
 use std::collections::BTreeMap;
+use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 pub enum Token<'a> {
@@ -128,6 +132,8 @@ impl fmt::Display for Token<'_> {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[derive(Debug, Clone)]
 pub struct Uheex {
     pub globals: Vec<VNode>,
@@ -136,26 +142,189 @@ pub struct Uheex {
 }
 
 impl Uheex {
-    pub fn new() -> Self {
-        Self {
-            globals: vec![],
-            root: VNode::Error(ErrorKind::Unknown),
-            stylesheet: None,
+    pub fn resolve_binds(&mut self) {
+        let mut binds: BTreeMap<String, VNode> = BTreeMap::new();
+
+        self.globals.iter().for_each(|node| match node {
+            VNode::Variable { name, value, .. } => {
+                match value {
+                    Expr::Value(Value::String(value)) => {
+                        binds.insert(name.clone(), VNode::String(value.clone()));
+                    }
+
+                    Expr::Value(Value::Number(value)) => {
+                        binds.insert(name.clone(), VNode::Number(*value));
+                    }
+
+                    Expr::Shell(cmd) => {
+                        let command = Command::new("bash").args(&["-c", cmd]).output();
+
+                        if let Ok(output) = command {
+                            if output.status.success() {
+                                if let Ok(result) = String::from_utf8(output.stdout) {
+                                    binds.insert(
+                                        name.clone(),
+                                        VNode::String(result.trim().to_string()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    _ => { /* Handle other expression types if needed */ }
+                }
+            }
+            _ => {}
+        });
+
+        self.root = self.replace_binds_in_vnode(&self.root, &binds);
+    }
+
+    fn replace_binds_in_vnode(&self, node: &VNode, binds: &BTreeMap<String, VNode>) -> VNode {
+        match node {
+            VNode::Binding(name) => {
+                if let Some(replacement) = binds.get(name) {
+                    replacement.clone()
+                } else {
+                    node.clone()
+                }
+            }
+            VNode::Window { attributes, child } => {
+                let new_attributes = attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.replace_binds_in_expr(v, binds)))
+                    .collect();
+
+                let new_child = Box::new(
+                    child
+                        .iter()
+                        .map(|c| self.replace_binds_in_vnode(c, binds))
+                        .collect(),
+                );
+
+                VNode::Window {
+                    attributes: new_attributes,
+                    child: new_child,
+                }
+            }
+            VNode::Then { cond, child } => {
+                let new_cond = Box::new(self.replace_binds_in_expr(cond, binds));
+                let new_child = Box::new(self.replace_binds_in_vnode(child, binds));
+
+                VNode::Then {
+                    cond: new_cond,
+                    child: new_child,
+                }
+            }
+            VNode::Repeat { times, child } => {
+                let new_times = Box::new(self.replace_binds_in_expr(times, binds));
+                let new_child = Box::new(self.replace_binds_in_vnode(child, binds));
+
+                VNode::Repeat {
+                    times: new_times,
+                    child: new_child,
+                }
+            }
+            VNode::Widget {
+                kind,
+                attributes,
+                child,
+            } => {
+                let new_attributes = attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.replace_binds_in_expr(v, binds)))
+                    .collect();
+
+                let new_child = Box::new(
+                    child
+                        .iter()
+                        .map(|c| self.replace_binds_in_vnode(c, binds))
+                        .collect(),
+                );
+
+                VNode::Widget {
+                    kind: kind.clone(),
+                    attributes: new_attributes,
+                    child: new_child,
+                }
+            }
+            VNode::Variable {
+                name,
+                initial,
+                value,
+                interval,
+            } => {
+                let new_initial = initial
+                    .as_ref()
+                    .map(|init| self.replace_binds_in_expr(init, binds));
+                let new_value = self.replace_binds_in_expr(value, binds);
+
+                VNode::Variable {
+                    name: name.clone(),
+                    initial: new_initial,
+                    value: new_value,
+                    interval: *interval,
+                }
+            }
+
+            _ => node.clone(), // For String, Number, Error, return as is
         }
+    }
+
+    fn replace_binds_in_expr(&self, expr: &Expr, binds: &BTreeMap<String, VNode>) -> Expr {
+        match expr {
+            Expr::Binding(name) => {
+                if let Some(replacement) = binds.get(name) {
+                    match replacement {
+                        VNode::String(s) => Expr::Value(Value::String(s.clone())),
+                        VNode::Number(n) => Expr::Value(Value::Number(*n)),
+                        _ => expr.clone(), // If the replacement is not a simple value, keep the original
+                    }
+                } else {
+                    expr.clone()
+                }
+            }
+            Expr::Binary {
+                kind,
+                left,
+                operator,
+                right,
+            } => {
+                let new_left = Box::new(self.replace_binds_in_expr(left, binds));
+                let new_right = Box::new(self.replace_binds_in_expr(right, binds));
+
+                Expr::Binary {
+                    kind: kind.clone(),
+                    left: new_left,
+                    operator: operator.clone(),
+                    right: new_right,
+                }
+            }
+            _ => expr.clone(), // For Value and Shell, return as is
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    pub fn as_raw(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap()
     }
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Clone)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub selector: Selector,
     pub declarations: Vec<Declaration>,
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(untagged,))]
 #[derive(Debug, Clone)]
 pub enum Selector {
     Tag(String),
@@ -163,6 +332,8 @@ pub enum Selector {
     Id(String),
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Debug, Clone)]
 pub enum Declaration {
     Simple {
@@ -175,6 +346,8 @@ pub enum Declaration {
     },
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", content = "data"))]
 #[derive(Debug, Clone)]
 pub enum VNode {
     Window {
@@ -210,11 +383,14 @@ pub enum VNode {
     Error(ErrorKind),
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Clone)]
 pub enum ErrorKind {
     Unknown,
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value),
@@ -228,6 +404,7 @@ pub enum Expr {
     Shell(String),
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Clone)]
 pub enum BinaryOperator {
     Add,
@@ -244,6 +421,8 @@ pub enum BinaryOperator {
     Lte,
 }
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 #[derive(Debug, Clone)]
 pub enum Value {
     String(String),
@@ -286,5 +465,4 @@ impl FromStr for DurationHuman {
             Err(format!("Invalid duration: {}", s))
         }
     }
-    
 }

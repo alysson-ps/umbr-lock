@@ -320,7 +320,7 @@ where
     expr.or(values).or(binding).padded_by(comments)
 }
 
-pub fn parser(code: &str) {
+pub fn parser(code: &str) -> Option<Uheex> {
     let tokens_iter = Token::lexer(code).spanned().map(|(t, s)| match t {
         Ok(t) => (t, <Range<usize> as Into<SimpleSpan>>::into(s)),
         Err(()) => (Token::Error, s.into()),
@@ -344,5 +344,13 @@ pub fn parser(code: &str) {
             .finish()
             .print(("config.uheex", Source::from(code)))
             .unwrap();
+    }
+
+    if let Some(mut result) = result {
+        result.resolve_binds();
+
+        Some(result)
+    } else {
+        None
     }
 }
