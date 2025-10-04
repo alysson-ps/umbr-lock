@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use uheex::parser::parser;
 use umbr_core::{Anyresult, UmbrError};
 
@@ -9,69 +9,116 @@ use umbr_core::{Anyresult, UmbrError};
 #[command(
     name = "umbr-lock",
     author = "Alysson <dev.alysson@hotmail.com>",
-    version,
-    about = "A CLI tool to manage and preview Umbr lock files.",
-    long_about = "Umbr Lock is a command-line tool for managing and previewing lock files in Umbr projects."
+    version
 )]
-struct Args {
+struct UmbrLock {
     /// Watch for changes in lock files
     #[arg(short, long, default_value_t = false)]
     watch: bool,
 
-    /// Preview the current lock file
-    #[arg(short, long, default_value_t = false)]
-    preview: bool,
+    /// Path to the layout file
+    #[arg(short, long, default_value = "layout.uheex")]
+    config: String,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-const SRC: &str = r#"
-    <U.Box :direction "column" :spacing 8>
-        <U.Button :text "Desbloquear" />
-        <U.Label>
-            <% @hello %>
-        </U.Label>
-    </U.Box>
-"#;
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Locker {
+        /// Preview the current lock file
+        #[arg(short, long, default_value_t = false)]
+        preview: bool,
+
+        /// Path to the layout file
+        #[arg(short, long, default_value = "layout.uheex")]
+        config: String,
+    },
+    Parser {
+        /// Path to the layout file
+        #[arg(short, long, default_value = "layout.uheex")]
+        config: String,
+
+        /// Output raw parse tree
+        #[arg(short, long, default_value_t = false)]
+        raw: bool,
+    },
+}
+
+enum RuntimeMode {
+    Preview,
+    Standard,
+}
 
 fn main() -> Anyresult<()> {
-    let args = Args::parse();
+    let cli = UmbrLock::parse();
 
-    if args.preview {
-        let (sender_to_render, receiver_from_windowing) =
-            mpsc::channel::<umbr_ui::types::WindowingMessage>();
-        let (sender_to_windowing, receiver_from_render) =
-            mpsc::channel::<umbr_ui::types::UiMessage>();
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Parser { config, raw } => {
+                let config = std::fs::read_to_string(&config).unwrap();
 
-        let mut windowing =
-            umbr_ui::win::WindowingApp::initialize(sender_to_render.clone(), receiver_from_render)
-                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+                if let Some(ast) = parser(&config.as_str()) {
+                    if raw {
+                        print!("{}", ast.as_raw());
+                        return Ok(());
+                    }
 
-        windowing
-            .initial_roundtrip()
-            .map_err(|err| UmbrError::Generic(err.to_string()))?;
+                    dbg!("Parsed Uheex:", ast);
+                }
+            }
+            Commands::Locker { config, preview } => {
+                let mode = if preview {
+                    RuntimeMode::Preview
+                } else {
+                    RuntimeMode::Standard
+                };
 
-        if let Some(_ast) = parser(SRC) {
-            let mut ui_runtime =
-                umbr_ui::mount_ui(sender_to_windowing.clone(), receiver_from_windowing)?;
+                let config = std::fs::read_to_string(&config).unwrap();
 
-            windowing
-                .process_ui_messages()
-                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+                if let Some(ast) = parser(config.as_str()) {
+                    match mode {
+                        RuntimeMode::Preview => {
+                            let _ui_runtime = umbr_ui::mount_ui_preview(ast);
+                        }
+                        RuntimeMode::Standard => {
+                            let (sender_to_render, receiver_from_windowing) =
+                                mpsc::channel::<umbr_ui::types::WindowingMessage>();
+                            let (sender_to_windowing, receiver_from_render) =
+                                mpsc::channel::<umbr_ui::types::UiMessage>();
 
-            while windowing.is_running() && ui_runtime.is_running() {
-                ui_runtime.process_messages()?;
-                windowing
-                    .dispatch_blocking()
-                    .map_err(|err| UmbrError::Generic(err.to_string()))?;
+                            let mut windowing = umbr_ui::win::WindowingApp::initialize(
+                                sender_to_render.clone(),
+                                receiver_from_render,
+                            )
+                            .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+                            windowing
+                                .initial_roundtrip()
+                                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+                            let mut ui_runtime = umbr_ui::mount_ui_standard(
+                                ast,
+                                sender_to_windowing.clone(),
+                                receiver_from_windowing,
+                            )?;
+
+                            windowing
+                                .process_ui_messages()
+                                .map_err(|err| UmbrError::Generic(err.to_string()))?;
+
+                            while windowing.is_running() && ui_runtime.is_running() {
+                                ui_runtime.process_messages()?;
+                                windowing
+                                    .dispatch_blocking()
+                                    .map_err(|err| UmbrError::Generic(err.to_string()))?;
+                            }
+                        }
+                    }
+                }
             }
         }
-
-        // thread::sleep(Duration::from_secs(2));
-
-        // sender_to_windowing
-        //     .send(umbr_ui::types::UiMessage::UnlockWithPassword {
-        //         password: "test".into(),
-        //     })
-        //     .unwrap();
     }
 
     Ok(())

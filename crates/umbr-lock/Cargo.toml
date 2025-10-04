@@ -8,4 +8,4 @@ clap = { version = "4.5.47", features = ["derive"] }
 
 umbr-core = { path = "../umbr-core" }
 umbr-ui = { path = "../umbr-ui" }
-uheex = { path = "../uheex" }
+uheex = { path = "../uheex" , features = ["serde"] }
