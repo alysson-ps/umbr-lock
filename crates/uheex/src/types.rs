@@ -142,7 +142,96 @@ pub struct Uheex {
 }
 
 impl Uheex {
-    pub fn resolve_binds(&mut self) {
+    #[cfg(feature = "serde")]
+    pub fn as_raw(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap()
+    }
+
+    pub fn evaluate(&mut self) {
+        // Convert all bindings to their evaluated forms
+        self.resolve_binds();
+
+        if let VNode::Window { child, .. } = &self.root {
+            let mut new_chd: Box<Vec<VNode>> = child.clone();
+
+            new_chd.iter_mut().for_each(|node| {
+                self.evaluate_vnode(node);
+            });
+
+            self.root = VNode::Window {
+                attributes: BTreeMap::new(),
+                child: new_chd.clone(),
+            };
+        }
+    }
+
+    fn evaluate_vnode(&mut self, node: &mut VNode) {
+        match node {
+            VNode::Widget { child, .. } => {
+                let mut new_chd: Box<Vec<VNode>> = child.clone();
+                new_chd.iter_mut().for_each(|n| self.evaluate_vnode(n));
+                *child = new_chd;
+            }
+            VNode::Then { cond, child } => {
+                if let Expr::Binary {
+                    left,
+                    operator,
+                    right,
+                    ..
+                } = cond.as_ref()
+                {
+                    let val_left = match left.as_ref() {
+                        Expr::Value(Value::String(s)) => s.clone(),
+                        Expr::Value(Value::Number(n)) => n.to_string(),
+                        _ => unimplemented!("Unsupported left expression in Then condition"),
+                    };
+
+                    let val_right = match right.as_ref() {
+                        Expr::Value(Value::String(s)) => s.clone(),
+                        Expr::Value(Value::Number(n)) => n.to_string(),
+                        _ => unimplemented!("Unsupported right expression in Then condition"),
+                    };
+
+                    let condition_met = match operator {
+                        BinaryOperator::Eq => val_left == val_right,
+                        BinaryOperator::NotEq => val_left != val_right,
+                        BinaryOperator::Gt => val_left > val_right,
+                        BinaryOperator::Lt => val_left < val_right,
+                        BinaryOperator::Gte => val_left >= val_right,
+                        BinaryOperator::Lte => val_left <= val_right,
+                        _ => unimplemented!("Unsupported operator in Then condition"),
+                    };
+
+                    if condition_met {
+                        self.evaluate_vnode(child);
+                        *node = *child.clone();
+                    } else {
+                        *node = VNode::Empty;
+                    }
+                }
+            }
+            VNode::Repeat { times, child } => {
+                if let Expr::Value(Value::Number(n)) = times.as_ref() {
+                    let count = *n as usize;
+                    let mut repeated_nodes = Vec::new();
+
+                    if count == 0 {
+                        *node = VNode::Empty;
+                        return;
+                    }
+
+                    for _ in 0..count {
+                        repeated_nodes.push(child.as_ref().clone());
+                    }
+
+                    *node = VNode::Fragment(Box::new(repeated_nodes));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_binds(&mut self) {
         let mut binds: BTreeMap<String, VNode> = BTreeMap::new();
 
         self.globals.iter().for_each(|node| match node {
@@ -274,14 +363,10 @@ impl Uheex {
     fn replace_binds_in_expr(&self, expr: &Expr, binds: &BTreeMap<String, VNode>) -> Expr {
         match expr {
             Expr::Binding(name) => {
-                if let Some(replacement) = binds.get(name) {
-                    match replacement {
-                        VNode::String(s) => Expr::Value(Value::String(s.clone())),
-                        VNode::Number(n) => Expr::Value(Value::Number(*n)),
-                        _ => expr.clone(), // If the replacement is not a simple value, keep the original
-                    }
-                } else {
-                    expr.clone()
+                match binds.get(name).unwrap() {
+                    VNode::String(s) => Expr::Value(Value::String(s.clone())),
+                    VNode::Number(n) => Expr::Value(Value::Number(*n)),
+                    _ => expr.clone(), // If the replacement is not a simple value, keep the original
                 }
             }
             Expr::Binary {
@@ -302,11 +387,6 @@ impl Uheex {
             }
             _ => expr.clone(), // For Value and Shell, return as is
         }
-    }
-
-    #[cfg(feature = "serde")]
-    pub fn as_raw(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap()
     }
 }
 
@@ -363,7 +443,7 @@ pub enum VNode {
         child: Box<VNode>,
     },
     Widget {
-        kind: String,
+        kind: WidgetKind,
         attributes: BTreeMap<String, Expr>,
         child: Box<Vec<VNode>>,
     },
@@ -380,14 +460,24 @@ pub enum VNode {
     Number(f64),
     Binding(String),
 
-    Error(ErrorKind),
+    Empty,
+    Fragment(Box<Vec<VNode>>),
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Clone)]
-pub enum ErrorKind {
-    Unknown,
+pub enum WidgetKind {
+    Label,
+    Row,
+    Column,
+    Custom,
 }
+
+// #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+// #[derive(Debug, Clone)]
+// pub enum ErrorKind {
+//     Unknown,
+// }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
