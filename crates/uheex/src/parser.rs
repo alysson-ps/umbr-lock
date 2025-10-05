@@ -320,7 +320,6 @@ where
         .clone()
         .foldl_with(op.then(atom).repeated(), |left, (operator, right), _e| {
             Expr::Binary {
-                kind: "".to_string(),
                 left: Box::new(left),
                 operator,
                 right: Box::new(right),

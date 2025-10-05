@@ -384,7 +384,6 @@ impl Uheex {
                 }
             }
             Expr::Binary {
-                kind,
                 left,
                 operator,
                 right,
@@ -393,7 +392,6 @@ impl Uheex {
                 let new_right = Box::new(self.replace_binds_in_expr(right, binds));
 
                 Expr::Binary {
-                    kind: kind.clone(),
                     left: new_left,
                     operator: operator.clone(),
                     right: new_right,
@@ -546,7 +544,6 @@ pub enum WidgetKind {
 pub enum Expr {
     Value(Value),
     Binary {
-        kind: String,
         left: Box<Expr>,
         operator: BinaryOperator,
         right: Box<Expr>,
