@@ -142,6 +142,20 @@ pub struct Uheex {
 }
 
 impl Uheex {
+    pub fn generate_css(&self) -> Option<String> {
+        if let Some(stylesheet) = &self.stylesheet {
+            let mut css = String::new();
+
+            stylesheet.rules.iter().for_each(|rule| {
+                css.push_str(&rule.to_css());
+            });
+
+            Some(css)
+        } else {
+            None
+        }
+    }
+
     #[cfg(feature = "serde")]
     pub fn as_raw(&self) -> String {
         serde_json::to_string_pretty(self).unwrap()
@@ -403,6 +417,26 @@ pub struct Rule {
     pub declarations: Vec<Declaration>,
 }
 
+impl Rule {
+    pub fn to_css(&self) -> String {
+        let mut css = String::new();
+
+        let selector = match &self.selector {
+            Selector::Tag(s) => s.clone(),
+            Selector::Class(s) => format!(".{}", s),
+            Selector::Id(s) => format!("#{}", s),
+        };
+
+        css.push_str(&format!("{} {{\n", selector));
+        for declaration in &self.declarations {
+            css.push_str(&format!("  {}\n", declaration.to_css(None)));
+        }
+        css.push_str("}\n");
+
+        css
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged,))]
 #[derive(Debug, Clone)]
@@ -424,6 +458,33 @@ pub enum Declaration {
         property: String,
         value: Vec<Declaration>,
     },
+}
+
+impl Declaration {
+    pub fn to_css(&self, prefix: Option<&str>) -> String {
+        match self {
+            Declaration::Simple { property, value } => {
+                let value_str = match value {
+                    Expr::Value(Value::String(s)) => s.clone(),
+                    Expr::Value(Value::Number(n)) => n.to_string(),
+                    _ => unimplemented!("Unsupported expression in declaration value"),
+                };
+                format!("{}{}: {};", prefix.unwrap_or(""), property, value_str)
+            }
+            Declaration::Nested { property, value } => {
+                let mut css = String::new();
+
+                value.into_iter().for_each(|d| {
+                    if matches!(d, Self::Simple { .. }) {
+                        css.push_str(&d.to_css(Some(&format!("{}-", property))));
+                        css.push('\n');
+                    }
+                });
+
+                css
+            }
+        }
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
