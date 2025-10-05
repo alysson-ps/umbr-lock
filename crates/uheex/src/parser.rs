@@ -10,7 +10,7 @@ use chumsky::span::SimpleSpan;
 use chumsky::{IterParser, Parser, extra, select};
 
 use crate::types::{
-    BinaryOperator, Declaration, DurationHuman, Expr, Rule, Selector, Stylesheet, Uheex, VNode,
+    BinaryOperator, Declaration, DurationHuman, Expr, Rule, Selector, Stylesheet, Uheex, VNode, WidgetKind,
 };
 
 use super::types::{Token, Value};
@@ -103,10 +103,19 @@ where
         let widget = ident
             .then(attributes())
             .then(expr.clone().repeated().at_least(1).collect::<Vec<_>>())
-            .map(|((kind, attrs), child)| VNode::Widget {
-                kind: kind.to_string(),
-                attributes: attrs,
-                child: Box::new(child),
+            .map(|((kind, attrs), child)| {
+                let kind = match kind.as_str() {
+                    "label" => WidgetKind::Label,
+                    "row" => WidgetKind::Row,
+                    "column" => WidgetKind::Column,
+                    _ => WidgetKind::Custom,
+                };
+
+                VNode::Widget {
+                    kind,
+                    attributes: attrs,
+                    child: Box::new(child),
+                }
             });
 
         let window = just(Token::Window)
@@ -347,7 +356,7 @@ pub fn parser(code: &str) -> Option<Uheex> {
     }
 
     if let Some(mut result) = result {
-        result.resolve_binds();
+        result.evaluate();
 
         Some(result)
     } else {
