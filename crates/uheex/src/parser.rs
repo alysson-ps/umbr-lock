@@ -10,7 +10,8 @@ use chumsky::span::SimpleSpan;
 use chumsky::{IterParser, Parser, extra, select};
 
 use crate::types::{
-    BinaryOperator, Declaration, DurationHuman, Expr, Rule, Selector, Stylesheet, Uheex, VNode, WidgetKind,
+    BinaryOperator, Declaration, DurationHuman, Expr, Rule, Selector, Stylesheet, Uheex, VNode,
+    WidgetKind,
 };
 
 use super::types::{Token, Value};
@@ -150,11 +151,12 @@ where
 {
     let comments = just(Token::Comment).repeated();
 
-    let ident = select! { Token::Identifier(v) => v.to_string() };
+    let ident = select! { Token::Identifier(v) => v.to_string() }
+        .or(just(Token::Window).to("window".to_string()));
 
     let declarations = recursive(|declarations| {
         let simple = just(Token::Colon)
-            .ignore_then(ident)
+            .ignore_then(ident.clone())
             .then(expression())
             .map(|(k, v)| Declaration::Simple {
                 property: k,
@@ -162,7 +164,7 @@ where
             })
             .labelled("simple declaration");
 
-        let nested = ident
+        let nested = ident.clone()
             .then(declarations.clone().repeated().collect::<Vec<_>>())
             .map(|(k, v)| Declaration::Nested {
                 property: k,
@@ -177,7 +179,7 @@ where
     .repeated()
     .collect::<Vec<_>>();
 
-    let widget = ident
+    let widget = ident.clone()
         .then(declarations.clone())
         .map(|(selector, declarations)| Rule {
             selector: Selector::Tag(selector),
