@@ -1,34 +1,36 @@
-#![allow(warnings)]
-
 extern crate gdk;
 extern crate gtk;
+
+use gio::prelude::*;
+use gtk::{Widget, prelude::*};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, Label, OffscreenWindow, Orientation};
-use smithay_client_toolkit::seat::keyboard::Keysym;
-use smithay_client_toolkit::shm::Shm;
-use smithay_client_toolkit::shm::slot::SlotPool;
-use umbr_core::{Anyresult, UmbrError};
-use wayland_client::protocol::wl_shm::{self, WlShm};
-use wayland_client::protocol::wl_surface::WlSurface;
+use gtk::{Box as GtkBox, Label, OffscreenWindow, Orientation};
 
-use self::types::{EventKeys, UiMessage, WindowingMessage};
+use smithay_client_toolkit::seat::keyboard::Keysym;
+use uheex::types::{Expr, Uheex, VNode, Value, WidgetKind};
+use umbr_core::{Anyresult, UmbrError};
+
+use self::types::*;
 
 pub mod types;
 pub mod win;
 
 pub struct UiRuntime {
-    sender: Sender<UiMessage>,
-    receiver: Receiver<WindowingMessage>,
+    sender: Option<Sender<UiMessage>>,
+    receiver: Option<Receiver<WindowingMessage>>,
     running: bool,
 }
 
 impl UiRuntime {
-    pub fn new(sender: Sender<UiMessage>, receiver: Receiver<WindowingMessage>) -> Anyresult<Self> {
+    pub fn standard(
+        styles: Uheex,
+        sender: Sender<UiMessage>,
+        receiver: Receiver<WindowingMessage>,
+    ) -> Anyresult<Self> {
         let (w, h) = wait_configure_and_render(&receiver)?;
 
-        let pixbuf = convert_to_pixels(w, h);
+        let pixbuf = convert_to_pixels(styles, w, h);
 
         sender
             .send(UiMessage::Render {
@@ -41,9 +43,60 @@ impl UiRuntime {
             .unwrap();
 
         Ok(Self {
-            sender,
-            receiver,
+            sender: Some(sender),
+            receiver: Some(receiver),
             running: true,
+        })
+    }
+
+    pub fn preview(styles: Uheex) -> Anyresult<Self> {
+        let app = gtk::Application::new(
+            Some("com.example.UmbrPreview"),
+            gio::ApplicationFlags::empty(),
+        )
+        .expect("Initialization failed...");
+
+        app.connect_activate(move |app| {
+            if let Some(css) = styles.generate_css() {
+                let provider = gtk::CssProvider::new();
+
+                provider
+                    .load_from_data(css.as_bytes())
+                    .expect("Failed to load CSS");
+
+                gtk::StyleContext::add_provider_for_screen(
+                    &gdk::Screen::get_default().expect("Error initializing gtk css provider."),
+                    &provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+
+            let window = gtk::ApplicationWindow::new(app);
+            window.set_title("Umbr Locker Preview");
+            window.set_border_width(10);
+            window.set_position(gtk::WindowPosition::Center);
+            window.set_default_size(1000, 560);
+            window.set_resizable(false);
+            window.set_decorated(false);
+
+            let layout = create_layout(styles.clone());
+
+            window.add(&layout.unwrap());
+
+            window.connect_delete_event(|_, _| {
+                gtk::main_quit();
+                Inhibit(false)
+            });
+
+            window.show_all();
+        });
+
+        app.run(&[]);
+
+        Ok(Self {
+            sender: None,
+            receiver: None,
+            running: false,
         })
     }
 
@@ -52,7 +105,10 @@ impl UiRuntime {
             return Ok(());
         }
 
-        match receive_messages(&self.receiver, &self.sender)? {
+        match receive_messages(
+            &self.receiver.as_ref().unwrap(),
+            &self.sender.as_ref().unwrap(),
+        )? {
             MessageLoopState::Continue => Ok(()),
             MessageLoopState::Stop => {
                 self.running = false;
@@ -66,16 +122,16 @@ impl UiRuntime {
     }
 }
 
-pub fn mount_ui(
+pub fn mount_ui_standard(
+    styles: Uheex,
     sender: Sender<UiMessage>,
     receiver: Receiver<WindowingMessage>,
 ) -> Anyresult<UiRuntime> {
-    UiRuntime::new(sender, receiver)
+    UiRuntime::standard(styles, sender, receiver)
 }
 
-enum MessageLoopState {
-    Continue,
-    Stop,
+pub fn mount_ui_preview(styles: Uheex) -> Anyresult<UiRuntime> {
+    UiRuntime::preview(styles)
 }
 
 fn handle_message(
@@ -153,26 +209,152 @@ struct PixbufSnapshot {
     n_channels: i32,
 }
 
-fn convert_to_pixels(width: u32, height: u32) -> PixbufSnapshot {
+fn create_layout(uheex: Uheex) -> Option<Widget> {
+    if let VNode::Window { attributes, child } = uheex.root {
+        let window = GtkBox::new(Orientation::Vertical, 10);
+
+        child.iter().for_each(|node| {
+            if let Some(widget) = convert_vnode_to_widget::<GtkBox>(node.clone(), None) {
+                window.add(&widget);
+            }
+        });
+
+        Some(window.upcast::<Widget>())
+    } else {
+        None
+    }
+}
+
+fn convert_vnode_to_widget<W>(vnode: VNode, parent: Option<&W>) -> Option<Widget>
+where
+    W: IsA<gtk::Container> + 'static,
+{
+    match vnode {
+        VNode::Widget {
+            kind,
+            attributes,
+            child,
+        } => {
+            match kind {
+                WidgetKind::Label => {
+                    let class = attributes.get("class").and_then(|s| match s {
+                        Expr::Value(Value::String(v)) => Some(v.as_str()),
+                        _ => None,
+                    });
+
+                    let text = child.first().and_then(|node| match node {
+                        VNode::String(value) => Some(value.as_str()),
+                        _ => None,
+                    });
+
+                    let label = Label::new(text);
+
+                    if let Some(class) = class {
+                        label.get_style_context().add_class(class);
+                    }
+
+                    Some(label.upcast::<Widget>())
+                }
+                WidgetKind::Row => {
+                    let spacing = attributes.get("spacing").and_then(|s| match s {
+                        Expr::Value(Value::Number(v)) => Some(*v as i32),
+                        _ => None,
+                    });
+
+                    let class = attributes.get("class").and_then(|s| match s {
+                        Expr::Value(Value::String(v)) => Some(v.as_str()),
+                        _ => None,
+                    });
+
+                    let row = GtkBox::new(Orientation::Horizontal, spacing.unwrap_or(0));
+
+                    if let Some(class) = class {
+                        row.get_style_context().add_class(class);
+                    }
+
+                    child.iter().for_each(|node| {
+                        if let Some(widget) = convert_vnode_to_widget(node.clone(), Some(&row)) {
+                            row.add(&widget);
+                        }
+                    });
+
+                    Some(row.upcast::<Widget>())
+                }
+                WidgetKind::Column => {
+                    let spacing = attributes.get("spacing").and_then(|s| match s {
+                        Expr::Value(Value::Number(v)) => Some(*v as i32),
+                        _ => None,
+                    });
+
+                    let class = attributes.get("class").and_then(|s| match s {
+                        Expr::Value(Value::String(v)) => Some(v.as_str()),
+                        _ => None,
+                    });
+
+                    let column = GtkBox::new(Orientation::Vertical, spacing.unwrap_or(0));
+
+                    if let Some(class) = class {
+                        column.get_style_context().add_class(class);
+                    }
+
+                    child.iter().for_each(|node| {
+                        if let Some(widget) = convert_vnode_to_widget(node.clone(), Some(&column)) {
+                            column.add(&widget);
+                        }
+                    });
+
+                    Some(column.upcast::<Widget>())
+                }
+                WidgetKind::Custom => {
+                    // Handle custom widgets or ignore
+                    unimplemented!("Custom widgets are not supported");
+                }
+            }
+        }
+
+        VNode::Fragment(nodes) => {
+            if let Some(parent) = parent {
+                for node in *nodes {
+                    if let Some(widget) = convert_vnode_to_widget::<W>(node, Some(parent)) {
+                        parent.add(&widget);
+                    }
+                }
+            }
+
+            None
+        }
+
+        _ => unimplemented!("Only widget nodes are supported"),
+    }
+}
+
+fn convert_to_pixels(layout: Uheex, width: u32, height: u32) -> PixbufSnapshot {
     gtk::init().expect("Failed to initialize GTK.");
 
-    // 1. Crie o OffscreenWindow
     let offscreen = OffscreenWindow::new();
+
     offscreen.set_default_size(width as i32, height as i32);
 
-    // 2. Monte sua interface normalmente
-    let vbox = GtkBox::new(Orientation::Vertical, 10);
-    let label = Label::new(Some("Olá, Locker!"));
-    let button = Button::with_label("Clique!");
-    vbox.pack_start(&label, false, false, 0);
-    vbox.pack_start(&button, false, false, 0);
+    if let Some(css) = layout.generate_css() {
+        let provider = gtk::CssProvider::new();
 
-    offscreen.add(&vbox);
+        provider
+            .load_from_data(css.as_bytes())
+            .expect("Failed to load CSS");
 
-    // 3. Mostre tudo (mesmo fora da tela)
+        gtk::StyleContext::add_provider_for_screen(
+            &gdk::Screen::get_default().expect("Error initializing gtk css provider."),
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    if let Some(layout) = create_layout(layout) {
+        offscreen.add(&layout);
+    }
+
     offscreen.show_all();
 
-    // 4. Force o GTK a processar eventos para garantir o render
     while gtk::events_pending() {
         gtk::main_iteration();
     }
