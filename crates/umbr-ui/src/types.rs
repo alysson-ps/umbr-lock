@@ -1,6 +1,4 @@
 use smithay_client_toolkit::seat::keyboard::KeyEvent;
-use wayland_client::protocol::wl_shm::WlShm;
-use wayland_client::protocol::wl_surface::WlSurface;
 
 #[derive(Debug)]
 pub enum WindowingMessage {
@@ -27,4 +25,9 @@ pub enum UiMessage {
         n_channels: i32,
         pixels: Vec<u8>,
     },
+}
+
+pub enum MessageLoopState {
+    Continue,
+    Stop,
 }
