@@ -245,23 +245,17 @@ impl AppData {
             return;
         }
 
-        if !(n_channels == 3 || n_channels == 4) {
+        if n_channels != 3 && n_channels != 4 {
             eprintln!("Unsupported channel count: {}", n_channels);
             return;
         }
 
-        let width_u32 = width as u32;
-        let height_u32 = height as u32;
-        let height_usize = height_u32 as usize;
-
+        let (w, h) = (width as usize, height as usize);
         let stride_usize = stride as usize;
-        let expected_len = match stride_usize.checked_mul(height_usize) {
+        let expected_len = match stride_usize.checked_mul(h) {
             Some(len) => len,
             None => {
-                eprintln!(
-                    "Overflow calculating expected pixel buffer length: stride={} height={}",
-                    stride, height
-                );
+                eprintln!("Overflow expected_len");
                 return;
             }
         };
@@ -275,14 +269,11 @@ impl AppData {
             return;
         }
 
-        let channels_usize = n_channels as usize;
-        let row_bytes = match (width_u32 as usize).checked_mul(channels_usize) {
-            Some(bytes) => bytes,
+        let channels = n_channels as usize;
+        let row_bytes = match w.checked_mul(channels) {
+            Some(v) => v,
             None => {
-                eprintln!(
-                    "Overflow calculating row byte count: width={} channels={}",
-                    width, n_channels
-                );
+                eprintln!("Overflow row_bytes");
                 return;
             }
         };
@@ -295,73 +286,83 @@ impl AppData {
             return;
         }
 
-        let dst_stride_usize = match (width_u32 as usize).checked_mul(4) {
-            Some(bytes) => bytes,
+        let dst_stride = match w.checked_mul(4) {
+            Some(v) => v,
             None => {
-                eprintln!(
-                    "Overflow calculating destination stride for width {}",
-                    width
-                );
+                eprintln!("Overflow dst_stride");
                 return;
             }
         };
-
-        let buffer_size = match dst_stride_usize.checked_mul(height_usize) {
-            Some(size) => size,
+        let buffer_size = match dst_stride.checked_mul(h) {
+            Some(v) => v,
             None => {
-                eprintln!(
-                    "Overflow calculating buffer size: stride={} height={}",
-                    dst_stride_usize, height
-                );
+                eprintln!("Overflow buffer_size");
                 return;
             }
         };
 
-        // Cria o SlotPool/buffer do smithay-client-toolkit
-        let mut pool =
-            SlotPool::new(buffer_size, &self.shm_state).expect("Failed to create slot pool");
-        let dst_stride_i32 = match i32::try_from(dst_stride_usize) {
-            Ok(value) => value,
-            Err(_) => {
-                eprintln!(
-                    "Destination stride does not fit in i32: {}",
-                    dst_stride_usize
-                );
-                return;
-            }
-        };
-
-        let (wlbuf, mut canvas) = pool
-            .create_buffer(width, height, dst_stride_i32, wl_shm::Format::Argb8888)
-            .expect("Failed to create buffer");
-
-        dbg!("Canvas size: {}", canvas.len());
-        dbg!("Pixels size: {}", pixels.len());
-
-        // Copia e converte para ARGB8888 linha a linha
-        let width_usize = width_u32 as usize;
-        for y in 0..height_usize {
-            let src_offset = y * stride_usize;
-            let dst_offset = y * dst_stride_usize;
-            let src_line = &pixels[src_offset..src_offset + row_bytes];
-            let dst_line = &mut canvas[dst_offset..dst_offset + dst_stride_usize];
-
-            for x in 0..width_usize {
-                let src = &src_line[x * channels_usize..x * channels_usize + channels_usize];
-                let dst = &mut dst_line[x * 4..x * 4 + 4];
-                // src: RGBA/RGB, dst: ARGB
-                let r = src[0];
-                let g = src[1];
-                let b = src[2];
-                let a = if channels_usize == 4 { src[3] } else { 255 };
-                dst[0] = a; // A
-                dst[1] = r; // R
-                dst[2] = g; // G
-                dst[3] = b; // B
-            }
+        let mut pool = SlotPool::new(buffer_size, &self.shm_state).expect("create slot pool");
+        let dst_stride_i32 = i32::try_from(dst_stride).unwrap_or_else(|_| {
+            eprintln!("dst_stride doesn't fit i32");
+            0
+        });
+        if dst_stride_i32 == 0 {
+            return;
         }
 
-        println!("First 4 pixels: {:?}", &canvas[..16]);
+        let (wlbuf, canvas) = pool
+            .create_buffer(width, height, dst_stride_i32, wl_shm::Format::Argb8888)
+            .expect("create buffer");
+
+        #[inline(always)]
+        fn premul(c: u8, a: u8) -> u8 {
+            // arredondado
+            ((c as u16 * a as u16 + 127) / 255) as u8
+        }
+
+        let has_alpha = channels == 4;
+
+        for y in 0..h {
+            let src_offset = y * stride_usize;
+            let dst_offset = y * dst_stride;
+
+            let src_line = &pixels[src_offset..src_offset + row_bytes];
+            let dst_line = &mut canvas[dst_offset..dst_offset + dst_stride];
+
+            if has_alpha {
+                // RGBA -> ARGB (premult)
+                for x in 0..w {
+                    let base = x * 4;
+                    let r = src_line[base + 0];
+                    let g = src_line[base + 1];
+                    let b = src_line[base + 2];
+                    let a = src_line[base + 3];
+
+                    let rp = premul(r, a);
+                    let gp = premul(g, a);
+                    let bp = premul(b, a);
+
+                    let px: u32 =
+                        ((a as u32) << 24) | ((rp as u32) << 16) | ((gp as u32) << 8) | (bp as u32);
+
+                    dst_line[x * 4..x * 4 + 4].copy_from_slice(&px.to_ne_bytes());
+                }
+            } else {
+                // RGB -> ARGB (a=255, sem premul efetivo)
+                for x in 0..w {
+                    let base = x * 3;
+                    let r = src_line[base + 0];
+                    let g = src_line[base + 1];
+                    let b = src_line[base + 2];
+                    let a = 255u8;
+
+                    let px: u32 =
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+
+                    dst_line[x * 4..x * 4 + 4].copy_from_slice(&px.to_ne_bytes());
+                }
+            }
+        }
 
         self.buffers.push((wlbuf, pool));
 
