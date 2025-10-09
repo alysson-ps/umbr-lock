@@ -4,7 +4,7 @@ use smithay_client_toolkit::seat::keyboard::KeyEvent;
 pub enum WindowingMessage {
     GtkEvent(EventKeys),
     Ready { width: u32, height: u32 },
-    UnlockFailed,
+    UnlockFailed(String),
     Quit,
 }
 #[derive(Debug)]

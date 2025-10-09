@@ -6,10 +6,10 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{PointerEvent, PointerHandler},
     },
     shm::{
-        self, Shm, ShmHandler,
+        Shm, ShmHandler,
         slot::{Buffer, SlotPool},
     },
 };
@@ -21,19 +21,18 @@ use wayland_client::{
     Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     globals::registry_queue_init,
     protocol::{
-        wl_buffer::{self, WlBuffer},
+        wl_buffer::{self},
         wl_callback::{self, WlCallback},
         wl_compositor, wl_display,
-        wl_keyboard::{self, WlKeyboard},
+        wl_keyboard::{self},
         wl_output, wl_pointer, wl_seat,
         wl_shm::{self, WlShm},
-        wl_shm_pool::WlShmPool,
-        wl_surface::{self, WlSurface},
+        wl_surface::{self},
         wl_touch,
     },
 };
 use wayland_protocols::ext::session_lock::v1::client::{
-    ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
+    ext_session_lock_manager_v1::{self},
     ext_session_lock_surface_v1, ext_session_lock_v1,
 };
 
@@ -65,7 +64,7 @@ impl WindowingApp {
 
         let display = conn.display();
 
-        let mut event_queue = conn.new_event_queue();
+        let event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
 
         let (globals, _queue) = registry_queue_init::<AppData>(&conn).unwrap();
@@ -131,39 +130,58 @@ impl WindowingApp {
                     n_channels,
                     pixels,
                 } => {
-                    dbg!("Entrou aqui");
                     self.state
                         .render(&pixels, width, height, stride, n_channels);
                 }
                 UiMessage::UnlockWithPassword { password } => {
-                    dbg!(&password);
-                    self.state.session_lock.unlock_and_destroy();
+                    if password.is_empty() {
+                        self.state
+                            .render_thread_sender
+                            .send(WindowingMessage::UnlockFailed(
+                                "Password cannot be empty".into(),
+                            ))
+                            .unwrap();
+                        continue;
+                    }
 
-                    self.state.wl_surface.attach(None, 0, 0);
-                    self.state.wl_surface.damage_buffer(
-                        0,
-                        0,
-                        self.state.width as i32,
-                        self.state.height as i32,
-                    );
-                    self.state.wl_surface.commit();
+                    // Flow to unlock
+                    {
+                        self.state.session_lock.unlock_and_destroy();
 
-                    self.event_queue
-                        .roundtrip(&mut self.state)
-                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                        self.state.wl_surface.attach(None, 0, 0);
+                        self.state.wl_surface.damage_buffer(
+                            0,
+                            0,
+                            self.state.width as i32,
+                            self.state.height as i32,
+                        );
+                        self.state.wl_surface.commit();
 
-                    self.event_queue
-                        .dispatch_pending(&mut self.state)
-                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-                    self.event_queue
-                        .flush()
-                        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-                    self.state
-                        .render_thread_sender
-                        .send(WindowingMessage::Quit)
-                        .unwrap();
-                    self.state.running = false;
-                    self.state.locked = false;
+                        self.event_queue
+                            .roundtrip(&mut self.state)
+                            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+                        self.event_queue
+                            .dispatch_pending(&mut self.state)
+                            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                        self.event_queue
+                            .flush()
+                            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                        self.state
+                            .render_thread_sender
+                            .send(WindowingMessage::Quit)
+                            .unwrap();
+                        self.state.running = false;
+                        self.state.locked = false;
+                    }
+
+                    // Flow error: wrong password
+                    // {
+                    //     self.state
+                    //         .render_thread_sender
+                    //         .send(WindowingMessage::UnlockFailed("Invalid password".into()))
+                    //         .unwrap();
+                    // }
                 }
             }
         }
@@ -415,12 +433,12 @@ impl ShmHandler for AppData {
 
 impl Dispatch<WlShm, ()> for AppData {
     fn event(
-        state: &mut Self,
-        proxy: &WlShm,
-        event: <WlShm as Proxy>::Event,
-        data: &(),
-        conn: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _state: &mut Self,
+        _proxy: &WlShm,
+        _event: <WlShm as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -481,55 +499,17 @@ impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for AppD
             height,
         } = event
         {
-            // log::debug!("surface reconfigure serial: {serial}");
-
             state.width = width;
             state.height = height;
 
             let sender = &state.render_thread_sender;
             if !state.configured {
-                // sender
-                //     .send(WindowingMessage::SurfaceReady {
-                //         display_id: state.wl_display.id(),
-                //         surface_id: state.wl_surface.id(),
-                //         size: (width, height),
-                //     })
-                //     .unwrap();
-
-                // Render vermelho aqui para testar!
                 state.configured = true;
                 surface.ack_configure(serial);
-
-                let mut pool =
-                    SlotPool::new(((width * 4) * height) as usize, &state.shm_state).unwrap(); // 1x1 pixel
-                let (wlbuf, canvas) = pool
-                    .create_buffer(
-                        width as i32,
-                        height as i32,
-                        (width * 4) as i32,
-                        wl_shm::Format::Argb8888,
-                    )
-                    .unwrap();
-                canvas[0] = 255; // A
-                canvas[1] = 255; // R
-                canvas[2] = 0; // G
-                canvas[3] = 0; // B
-                state.wl_surface.attach(Some(&wlbuf.wl_buffer()), 0, 0);
-                state.wl_surface.damage_buffer(0, 0, 1, 1);
-                state.wl_surface.commit();
 
                 sender
                     .send(WindowingMessage::Ready { width, height })
                     .unwrap();
-
-                // render(
-                //     &state.shm_state.wl_shm(),
-                //     &state.wl_surface,
-                //     width,
-                //     height,
-                //     width * 4,
-                //     &vec![0; (width * height * 4) as usize], // pixels dummy
-                // );
             }
         }
     }
@@ -550,8 +530,6 @@ impl SeatHandler for AppData {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            // log::debug!("got keyboard capability");
-
             let keyboard = self
                 .seat_state
                 .get_keyboard(qh, &seat, None)
@@ -561,8 +539,6 @@ impl SeatHandler for AppData {
         }
 
         if capability == Capability::Pointer && self.pointer.is_none() {
-            // log::debug!("got pointer capability");
-
             let pointer = self
                 .seat_state
                 .get_pointer(qh, &seat)
@@ -579,12 +555,10 @@ impl SeatHandler for AppData {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_some() {
-            // log::debug!("unset keyboard capability");
             self.keyboard.take().unwrap().release();
         }
 
         if capability == Capability::Pointer && self.pointer.is_some() {
-            // log::debug!("unset pointer capability");
             self.pointer.take().unwrap().release();
         }
     }
@@ -603,7 +577,6 @@ impl KeyboardHandler for AppData {
         _: &[u32],
         _keysyms: &[Keysym],
     ) {
-        dbg!("Keyboard focus on our surface");
     }
 
     fn leave(
@@ -624,22 +597,9 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
-        dbg!(&event);
-        match event.keysym {
-            Keysym::Return => {
-                self.render_thread_sender
-                    .send(WindowingMessage::GtkEvent(EventKeys::Pressed { event }))
-                    .unwrap();
-            }
-            _ => {}
-        }
-        // if let Some(text) = sctk_key_event_to_slint(event) {
-        //     self.render_thread_sender
-        //         .send(WindowingMessage::SlintWindowEvent(
-        //             WindowEvent::KeyPressed { text },
-        //         ))
-        //         .unwrap();
-        // }
+        self.render_thread_sender
+            .send(WindowingMessage::GtkEvent(EventKeys::Pressed { event }))
+            .unwrap();
     }
 
     fn release_key(
@@ -650,22 +610,9 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
-        dbg!(&event);
-        match event.keysym {
-            Keysym::Return => {
-                self.render_thread_sender
-                    .send(WindowingMessage::GtkEvent(EventKeys::Released { event }))
-                    .unwrap();
-            }
-            _ => {}
-        }
-        // if let Some(text) = sctk_key_event_to_slint(event) {
-        //     self.render_thread_sender
-        //         .send(WindowingMessage::SlintWindowEvent(
-        //             WindowEvent::KeyReleased { text },
-        //         ))
-        //         .unwrap();
-        // }
+        self.render_thread_sender
+            .send(WindowingMessage::GtkEvent(EventKeys::Released { event }))
+            .unwrap();
     }
 
     fn update_modifiers(
@@ -686,7 +633,7 @@ impl PointerHandler for AppData {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
+        _events: &[PointerEvent],
     ) {
     }
 }

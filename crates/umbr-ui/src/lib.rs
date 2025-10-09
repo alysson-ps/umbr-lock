@@ -1,22 +1,30 @@
 extern crate gdk;
 extern crate gtk;
 
+use gdk::keys::constants::l;
 use gio::prelude::*;
-use gtk::{Widget, prelude::*};
+use gtk::{Overlay, Widget, prelude::*};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gtk::{Box as GtkBox, Label, OffscreenWindow, Orientation};
 
-use smithay_client_toolkit::seat::keyboard::Keysym;
 use uheex::types::{Expr, Uheex, VNode, Value, WidgetKind};
 use umbr_core::{Anyresult, UmbrError};
 
+use self::keyboard::listen_for_keyboard_events;
+use self::state::PasswordBuffer;
 use self::types::*;
+
+mod keyboard;
+mod state;
 
 pub mod types;
 pub mod win;
 
 pub struct UiRuntime {
+    buffer: PasswordBuffer,
     sender: Option<Sender<UiMessage>>,
     receiver: Option<Receiver<WindowingMessage>>,
     running: bool,
@@ -43,6 +51,7 @@ impl UiRuntime {
             .unwrap();
 
         Ok(Self {
+            buffer: PasswordBuffer::new(),
             sender: Some(sender),
             receiver: Some(receiver),
             running: true,
@@ -73,15 +82,13 @@ impl UiRuntime {
 
             let window = gtk::ApplicationWindow::new(app);
             window.set_title("Umbr Locker Preview");
-            window.set_border_width(10);
-            window.set_position(gtk::WindowPosition::Center);
             window.set_default_size(1000, 560);
             window.set_resizable(false);
             window.set_decorated(false);
 
-            let layout = create_layout(styles.clone());
-
-            window.add(&layout.unwrap());
+            if let Some(layout) = create_layout(styles.clone()) {
+                window.add(&layout);
+            }
 
             window.connect_delete_event(|_, _| {
                 gtk::main_quit();
@@ -94,6 +101,7 @@ impl UiRuntime {
         app.run(&[]);
 
         Ok(Self {
+            buffer: PasswordBuffer::new(),
             sender: None,
             receiver: None,
             running: false,
@@ -106,6 +114,7 @@ impl UiRuntime {
         }
 
         match receive_messages(
+            &mut self.buffer,
             &self.receiver.as_ref().unwrap(),
             &self.sender.as_ref().unwrap(),
         )? {
@@ -135,29 +144,16 @@ pub fn mount_ui_preview(styles: Uheex) -> Anyresult<UiRuntime> {
 }
 
 fn handle_message(
+    buffer: &mut PasswordBuffer,
     message: WindowingMessage,
     sender: &Sender<UiMessage>,
 ) -> Anyresult<MessageLoopState> {
-    dbg!("Received message:", &message);
     match message {
-        WindowingMessage::GtkEvent(e) => match e {
-            EventKeys::Pressed { event } => {
-                dbg!("Key pressed:", &event);
-                if event.keysym == Keysym::Return {
-                    dbg!("Enter key pressed");
-                    sender
-                        .send(UiMessage::UnlockWithPassword {
-                            password: "test".into(),
-                        })
-                        .unwrap();
-                }
-            }
-            EventKeys::Released { event } => {
-                dbg!("Key released:", event);
-            }
-        },
-        WindowingMessage::UnlockFailed => {
-            dbg!("Unlock failed");
+        WindowingMessage::GtkEvent(e) => {
+            listen_for_keyboard_events(e, buffer, sender);
+        }
+        WindowingMessage::UnlockFailed(message) => {
+            dbg!(&message);
         }
         WindowingMessage::Quit => {
             dbg!("Quitting windowing thread");
@@ -169,6 +165,7 @@ fn handle_message(
 }
 
 fn receive_messages(
+    buffer: &mut PasswordBuffer,
     receiver: &Receiver<WindowingMessage>,
     sender: &Sender<UiMessage>,
 ) -> Anyresult<MessageLoopState> {
@@ -176,7 +173,7 @@ fn receive_messages(
         let message = receiver.try_recv();
         match message {
             Ok(message) => {
-                if let MessageLoopState::Stop = handle_message(message, sender)? {
+                if let MessageLoopState::Stop = handle_message(buffer, message, sender)? {
                     return Ok(MessageLoopState::Stop);
                 }
             }
@@ -209,23 +206,68 @@ struct PixbufSnapshot {
     n_channels: i32,
 }
 
+#[derive(Debug, Clone)]
+struct Options {
+    monitor: Option<i32>,
+    anchor: Option<(gtk::Align, gtk::Align)>,
+}
+
 fn create_layout(uheex: Uheex) -> Option<Widget> {
     if let VNode::Window { attributes, child } = uheex.root {
-        let window = GtkBox::new(Orientation::Vertical, 10);
+        let monitor = attributes.get("monitor").and_then(|s| match s {
+            Expr::Value(Value::Number(v)) => Some(*v as i32),
+            _ => None,
+        });
+
+        let anchor = attributes.get("anchor").and_then(|s| match s {
+            Expr::Array(v) if v.len() == 2 => {
+                let h_anchor = v[0].clone();
+                let v_anchor = v[1].clone();
+
+                let h_anchor = match h_anchor {
+                    Expr::Value(Value::String(ref s)) if s == "left" => gtk::Align::Start,
+                    Expr::Value(Value::String(ref s)) if s == "center" => gtk::Align::Center,
+                    Expr::Value(Value::String(ref s)) if s == "right" => gtk::Align::End,
+                    _ => gtk::Align::Center,
+                };
+
+                let v_anchor = match v_anchor {
+                    Expr::Value(Value::String(ref s)) if s == "top" => gtk::Align::Start,
+                    Expr::Value(Value::String(ref s)) if s == "center" => gtk::Align::Center,
+                    Expr::Value(Value::String(ref s)) if s == "bottom" => gtk::Align::End,
+                    _ => gtk::Align::Center,
+                };
+
+                Some((h_anchor, v_anchor))
+            }
+            _ => None,
+        });
+
+        let overlay = Overlay::new();
 
         child.iter().for_each(|node| {
-            if let Some(widget) = convert_vnode_to_widget::<GtkBox>(node.clone(), None) {
-                window.add(&widget);
+            if let Some(widget) = convert_vnode_to_widget::<GtkBox>(
+                node.clone(),
+                None,
+                Rc::new(overlay.clone()),
+                Options { monitor, anchor },
+            ) {
+                overlay.add(&widget);
             }
         });
 
-        Some(window.upcast::<Widget>())
+        Some(overlay.upcast::<Widget>())
     } else {
         None
     }
 }
 
-fn convert_vnode_to_widget<W>(vnode: VNode, parent: Option<&W>) -> Option<Widget>
+fn convert_vnode_to_widget<W>(
+    vnode: VNode,
+    parent: Option<&W>,
+    overlay: Rc<Overlay>,
+    options: Options,
+) -> Option<Widget>
 where
     W: IsA<gtk::Container> + 'static,
 {
@@ -237,21 +279,13 @@ where
         } => {
             match kind {
                 WidgetKind::Label => {
-                    let class = attributes.get("class").and_then(|s| match s {
-                        Expr::Value(Value::String(v)) => Some(v.as_str()),
-                        _ => None,
-                    });
-
                     let text = child.first().and_then(|node| match node {
                         VNode::String(value) => Some(value.as_str()),
                         _ => None,
                     });
 
                     let label = Label::new(text);
-
-                    if let Some(class) = class {
-                        label.get_style_context().add_class(class);
-                    }
+                    apply_attributes(&label, &attributes, &options);
 
                     Some(label.upcast::<Widget>())
                 }
@@ -261,19 +295,24 @@ where
                         _ => None,
                     });
 
-                    let class = attributes.get("class").and_then(|s| match s {
-                        Expr::Value(Value::String(v)) => Some(v.as_str()),
-                        _ => None,
-                    });
-
                     let row = GtkBox::new(Orientation::Horizontal, spacing.unwrap_or(0));
 
-                    if let Some(class) = class {
-                        row.get_style_context().add_class(class);
+                    apply_attributes(&row, &attributes, &options);
+
+                    if parent.is_none() {
+                        row.set_hexpand(true);
+                        row.set_vexpand(true);
+                        row.set_halign(gtk::Align::Fill);
+                        row.set_valign(gtk::Align::Fill);
                     }
 
                     child.iter().for_each(|node| {
-                        if let Some(widget) = convert_vnode_to_widget(node.clone(), Some(&row)) {
+                        if let Some(widget) = convert_vnode_to_widget(
+                            node.clone(),
+                            Some(&row),
+                            overlay.clone(),
+                            options.clone(),
+                        ) {
                             row.add(&widget);
                         }
                     });
@@ -286,36 +325,88 @@ where
                         _ => None,
                     });
 
-                    let class = attributes.get("class").and_then(|s| match s {
-                        Expr::Value(Value::String(v)) => Some(v.as_str()),
-                        _ => None,
-                    });
-
                     let column = GtkBox::new(Orientation::Vertical, spacing.unwrap_or(0));
 
-                    if let Some(class) = class {
-                        column.get_style_context().add_class(class);
+                    apply_attributes(&column, &attributes, &options);
+
+                    if parent.is_none() {
+                        column.set_hexpand(true);
+                        column.set_vexpand(true);
+                        column.set_halign(gtk::Align::Fill);
+                        column.set_valign(gtk::Align::Fill);
                     }
 
                     child.iter().for_each(|node| {
-                        if let Some(widget) = convert_vnode_to_widget(node.clone(), Some(&column)) {
+                        if let Some(widget) = convert_vnode_to_widget(
+                            node.clone(),
+                            Some(&column),
+                            overlay.clone(),
+                            options.clone(),
+                        ) {
                             column.add(&widget);
                         }
                     });
 
                     Some(column.upcast::<Widget>())
                 }
-                WidgetKind::Custom => {
-                    // Handle custom widgets or ignore
-                    unimplemented!("Custom widgets are not supported");
+                WidgetKind::Absolute => {
+                    let x = attributes.get("x").and_then(|s| match s {
+                        Expr::Value(Value::String(v)) => v.parse::<i32>().ok(),
+                        Expr::Value(Value::Number(v)) => Some(*v as i32),
+                        _ => None,
+                    });
+
+                    let y = attributes.get("y").and_then(|s| match s {
+                        Expr::Value(Value::String(v)) => v.parse::<i32>().ok(),
+                        Expr::Value(Value::Number(v)) => Some(*v as i32),
+                        _ => None,
+                    });
+
+                    let fixed = gtk::Fixed::new();
+
+                    if let Some(widget) = convert_vnode_to_widget::<W>(
+                        child.first()?.clone(),
+                        parent,
+                        overlay.clone(),
+                        options.clone(),
+                    ) {
+                        fixed.put(&widget, x.unwrap_or(0), y.unwrap_or(0));
+                        fixed.set_valign(
+                            options
+                                .clone()
+                                .anchor
+                                .map(|(_, v)| v)
+                                .unwrap_or(gtk::Align::Start),
+                        );
+                        fixed.set_halign(
+                            options
+                                .clone()
+                                .anchor
+                                .map(|(h, _)| h)
+                                .unwrap_or(gtk::Align::Start),
+                        );
+                        overlay.add_overlay(&fixed);
+                    }
+
+                    None
                 }
+                // WidgetKind::Custom => {
+                //     // Handle custom widgets or ignore
+                //     unimplemented!("Custom widgets are not supported");
+                // }
+                _ => unimplemented!("Widget kind not supported"),
             }
         }
 
         VNode::Fragment(nodes) => {
             if let Some(parent) = parent {
                 for node in *nodes {
-                    if let Some(widget) = convert_vnode_to_widget::<W>(node, Some(parent)) {
+                    if let Some(widget) = convert_vnode_to_widget::<W>(
+                        node,
+                        Some(parent),
+                        overlay.clone(),
+                        options.clone(),
+                    ) {
                         parent.add(&widget);
                     }
                 }
@@ -325,6 +416,90 @@ where
         }
 
         _ => unimplemented!("Only widget nodes are supported"),
+    }
+}
+
+fn apply_attributes<W>(widget: &W, attributes: &BTreeMap<String, Expr>, options: &Options)
+where
+    W: IsA<gtk::Widget> + 'static,
+{
+    // Get attributes
+    let align = attributes.get("align").and_then(|s| match s {
+        Expr::Array(v) if v.len() == 2 => {
+            let h_align = v[0].clone();
+            let v_align = v[1].clone();
+
+            let h_align = match h_align {
+                Expr::Value(Value::String(ref s)) if s == "start" => gtk::Align::Start,
+                Expr::Value(Value::String(ref s)) if s == "center" => gtk::Align::Center,
+                Expr::Value(Value::String(ref s)) if s == "end" => gtk::Align::End,
+                _ => gtk::Align::Start,
+            };
+
+            let v_align = match v_align {
+                Expr::Value(Value::String(ref s)) if s == "top" => gtk::Align::Start,
+                Expr::Value(Value::String(ref s)) if s == "center" => gtk::Align::Center,
+                Expr::Value(Value::String(ref s)) if s == "bottom" => gtk::Align::End,
+                _ => gtk::Align::Start,
+            };
+
+            Some((h_align, v_align))
+        }
+        _ => None,
+    });
+
+    let flexible = attributes.get("flexible").and_then(|s| match s {
+        Expr::Value(Value::String(v)) => Some(v == "true"),
+        _ => None,
+    });
+
+    let class = attributes.get("class").and_then(|s| match s {
+        Expr::Value(Value::String(v)) => Some(v.as_str()),
+        _ => None,
+    });
+
+    let size = attributes.get("size").and_then(|s| match s {
+        Expr::Array(v) if v.len() == 2 => {
+            let width = v[0].clone();
+            let height = v[1].clone();
+
+            let width = match width {
+                Expr::Value(Value::String(ref s)) => s.parse::<i32>().ok().unwrap_or(-1),
+                Expr::Value(Value::Number(v)) => v as i32,
+                _ => -1,
+            };
+
+            let height = match height {
+                Expr::Value(Value::String(ref s)) => s.parse::<i32>().ok().unwrap_or(-1),
+                Expr::Value(Value::Number(v)) => v as i32,
+                _ => -1,
+            };
+
+            Some((width, height))
+        }
+        _ => None,
+    });
+
+    // Apply class
+    if let Some(class) = class {
+        widget.get_style_context().add_class(class);
+    }
+
+    // Apply flexibility
+    if flexible.unwrap_or(false) {
+        widget.set_hexpand(true);
+        widget.set_vexpand(true);
+    }
+
+    // Apply size
+    if let Some((width, height)) = size {
+        widget.set_size_request(width, height);
+    }
+
+    // Apply alignment
+    if let Some((h_align, v_align)) = align.or(options.anchor) {
+        widget.set_halign(h_align);
+        widget.set_valign(v_align);
     }
 }
 

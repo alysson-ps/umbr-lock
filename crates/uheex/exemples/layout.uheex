@@ -1,24 +1,35 @@
 ;; Globals Variables
 (declare
+    (variable :name 'count' (5))
     (variable :name 'dot' ('•'))
     (variable :name 'username' $('whoami'))
-    (variable :name 'time' :interval '60s' $('date +%H:%M'))
 )
 
 ;; Layout
-(window :monitor 0 
+(window :monitor 0 :anchor ['center', 'center']
     (column :class 'container'
-        ;; Time
-        (label :class 'time' (&time))
+        (column :class 'box' :flexible true :size [300, 20] 
+            (absolute :x '-50' :y '-50'
+                (label :class 'title' ('Authenticate into Arch Linux'))
+            )
 
-        ;; Username
-        (label :class 'username' (&username))
+            ;; Line username
+            (row :align ['start', 'center'] 
+                (label :class 'label' ('Username: '))
+                (label :class 'username' (&username))
+            )
 
-        ;; Dots
-        (then :cond (&count > 0) 
-            (row :class 'dots' :spacing 8
-                (repeat :times &count
-                    (label :class 'dot' (&dot))
+            ;; Line password
+            (row :align ['start', 'center']
+                (label :class 'label' ('Password: '))
+                            
+                ;; Dots
+                (then :cond (&count > 0) 
+                    (row :class 'dots' :spacing 2
+                        (repeat :times &count
+                            (label :class 'dot' (&dot))
+                        )
+                    )
                 )
             )
         )
@@ -27,45 +38,23 @@
 
 ;; Styles
 (stylesheet
-    ;; Keyword not working
-    (test 
-        :bg '#222222'
-        :padding 12
+    (.container
+        :background '#000'
     )
-    (.container 
-        :padding 12
-        :bg '#333333'
+    (.title
+        :color 'white'
+        :background '#000'
+        :padding '0 6px'
     )
-    (.time 
-        :align 'center'
-        (font
-            :size 48
-            :color '#FFFFFF'
-            :weight 'bold'
-            :family 'monospace'
-        )
-        (padding 
-            :bottom 8
-        )
-    )
-    (.username 
-        :align 'center'
-        (font 
-            :size 24
-            :color '#AAAAAA'
-            :family 'monospace'
-        )
-        (padding 
-            :bottom 8
-        )
-    )
-    (.dots 
-        :align 'center'
+    (.label :color '#FFFFFF')
+    (.box
+        :padding '20px'
+        (border :width '2px' :color '#FFFFFF' :style 'solid')
     )
     (.dot 
+        :color '#FFFFFF'
         (font
-            :color '#FFFFFF'
-            :size 16
+            :size '12px'
             :family 'monospace'
         )
     )

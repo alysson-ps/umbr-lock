@@ -49,6 +49,13 @@ pub enum Token<'a> {
     #[token("$")]
     Dollar,
 
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
+    #[token(",")]
+    Comma,
+
     // === Operators ===
     #[token("-")]
     Minus,
@@ -126,6 +133,9 @@ impl fmt::Display for Token<'_> {
             Self::Minus => write!(f, "-"),
             Self::LiteralString(v) => write!(f, "{}", v),
             Self::Identifier(v) => write!(f, "{}", v),
+            Self::LBracket => write!(f, "["),
+            Self::RBracket => write!(f, "]"),
+            Self::Comma => write!(f, ","),
             Self::Whitespace => write!(f, "<whitespace>"),
             Self::Error => write!(f, "<error>"),
         }
@@ -165,15 +175,16 @@ impl Uheex {
         // Convert all bindings to their evaluated forms
         self.resolve_binds();
 
-        if let VNode::Window { child, .. } = &self.root {
+        if let VNode::Window { child, attributes } = &self.root {
             let mut new_chd: Box<Vec<VNode>> = child.clone();
+            let new_attrs = attributes.clone();
 
             new_chd.iter_mut().for_each(|node| {
                 self.evaluate_vnode(node);
             });
 
             self.root = VNode::Window {
-                attributes: BTreeMap::new(),
+                attributes: new_attrs,
                 child: new_chd.clone(),
             };
         }
@@ -529,6 +540,7 @@ pub enum WidgetKind {
     Label,
     Row,
     Column,
+    Absolute,
     Custom,
 }
 
@@ -543,6 +555,7 @@ pub enum WidgetKind {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value),
+    Array(Vec<Expr>),
     Binary {
         left: Box<Expr>,
         operator: BinaryOperator,

@@ -40,7 +40,7 @@ where
         .then_ignore(end())
         .map(|((declare, root), stylesheet)| Uheex {
             globals: declare.unwrap_or(vec![]),
-            root,
+            root: root,
             stylesheet,
         })
 }
@@ -109,6 +109,7 @@ where
                     "label" => WidgetKind::Label,
                     "row" => WidgetKind::Row,
                     "column" => WidgetKind::Column,
+                    "absolute" => WidgetKind::Absolute,
                     _ => WidgetKind::Custom,
                 };
 
@@ -164,7 +165,8 @@ where
             })
             .labelled("simple declaration");
 
-        let nested = ident.clone()
+        let nested = ident
+            .clone()
             .then(declarations.clone().repeated().collect::<Vec<_>>())
             .map(|(k, v)| Declaration::Nested {
                 property: k,
@@ -179,7 +181,8 @@ where
     .repeated()
     .collect::<Vec<_>>();
 
-    let widget = ident.clone()
+    let widget = ident
+        .clone()
         .then(declarations.clone())
         .map(|(selector, declarations)| Rule {
             selector: Selector::Tag(selector),
@@ -221,7 +224,6 @@ where
     }
     .delimited_by(just(Token::LParenthesis), just(Token::RParenthesis));
 
-    // TODO: improve shell parsing, now it only supports `$(...)`
     let shell = just(Token::Dollar)
         .ignore_then(values.clone())
         .try_map(|v, span| match v {
@@ -301,6 +303,18 @@ where
         .ignore_then(ident)
         .map(|v| Expr::Binding(v));
 
+    let items = values
+        .clone()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>();
+
+    let array = items
+        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+        .map(|v| Expr::Array(v));
+
+    let atom = values.or(binding.clone()).or(array.clone());
+
     let op = select! {
         Token::Gt => BinaryOperator::Gt,
         Token::Lt => BinaryOperator::Lt,
@@ -314,8 +328,6 @@ where
         Token::Or => BinaryOperator::Or,
     };
 
-    let atom = values.or(binding.clone());
-
     let expr = atom
         .clone()
         .foldl_with(op.then(atom).repeated(), |left, (operator, right), _e| {
@@ -327,7 +339,7 @@ where
         })
         .delimited_by(just(Token::LParenthesis), just(Token::RParenthesis));
 
-    expr.or(values).or(binding).padded_by(comments)
+    expr.or(values).or(binding).or(array).padded_by(comments)
 }
 
 pub fn parser(code: &str) -> Option<Uheex> {
