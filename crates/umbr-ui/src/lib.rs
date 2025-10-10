@@ -31,6 +31,7 @@ pub struct UiRuntime {
     sender: Option<Sender<UiMessage>>,
     receiver: Option<Receiver<WindowingMessage>>,
     running: bool,
+    render_dimensions: Option<(u32, u32)>,
 }
 
 impl UiRuntime {
@@ -46,6 +47,7 @@ impl UiRuntime {
             sender: None,
             receiver: None,
             running: false,
+            render_dimensions: None,
         }
     }
 
@@ -58,17 +60,50 @@ impl UiRuntime {
     pub fn update_count(&mut self, count: usize) {
         if let Some(original) = &self.original_layout {
             let mut updated = original.clone();
+            let mut found = false;
 
-            updated.globals.push(VNode::Variable {
-                name: "count".into(),
-                initial: Some(Expr::Value(Value::Number(0 as f64))),
-                value: Expr::Value(Value::Number(count as f64)),
-                interval: Duration::from_secs(1),
-            });
+            for global in updated.globals.iter_mut() {
+                if let VNode::Variable { name, value, .. } = global {
+                    if name == "count" {
+                        *value = Expr::Value(Value::Number(count as f64));
+                        found = true;
+                        break;
+                    }
+                }
+            }
 
-            updated.evaluate();
+            if !found {
+                updated.globals.push(VNode::Variable {
+                    name: "count".into(),
+                    initial: Some(Expr::Value(Value::Number(0 as f64))),
+                    value: Expr::Value(Value::Number(count as f64)),
+                    interval: Duration::from_secs(1),
+                });
+            }
 
-            self.layout = updated;
+            self.original_layout = Some(updated.clone());
+
+            let mut evaluated = updated;
+            evaluated.evaluate();
+
+            self.layout = evaluated;
+
+            if self.running {
+                if let (Some((width, height)), Some(sender)) =
+                    (self.render_dimensions, self.sender.as_ref())
+                {
+                    let pixbuf = convert_to_pixels(&self.layout, width, height);
+                    if let Err(err) = sender.send(UiMessage::Render {
+                        width: pixbuf.width,
+                        height: pixbuf.height,
+                        stride: pixbuf.stride,
+                        n_channels: pixbuf.n_channels,
+                        pixels: pixbuf.pixels,
+                    }) {
+                        eprintln!("Failed to send re-render message: {err}");
+                    }
+                }
+            }
         }
     }
 
@@ -78,6 +113,8 @@ impl UiRuntime {
         receiver: Receiver<WindowingMessage>,
     ) -> Anyresult<Self> {
         let (w, h) = wait_configure_and_render(&receiver)?;
+
+        self.render_dimensions = Some((w, h));
 
         let pixbuf = convert_to_pixels(&self.layout, w, h);
 
@@ -93,11 +130,12 @@ impl UiRuntime {
 
         Ok(Self {
             layout: self.layout.clone(),
-            original_layout: Some(self.layout.clone()),
+            original_layout: self.original_layout.clone(),
             buffer: Some(PasswordBuffer::new()),
             sender: Some(sender),
             receiver: Some(receiver),
             running: true,
+            render_dimensions: Some((w, h)),
         })
     }
 
@@ -147,11 +185,12 @@ impl UiRuntime {
 
         Ok(Self {
             layout: self.layout.clone(),
-            original_layout: Some(self.layout.clone()),
+            original_layout: self.original_layout.clone(),
             buffer: None,
             sender: None,
             receiver: None,
             running: false,
+            render_dimensions: None,
         })
     }
 
