@@ -388,10 +388,14 @@ impl Uheex {
     fn replace_binds_in_expr(&self, expr: &Expr, binds: &BTreeMap<String, VNode>) -> Expr {
         match expr {
             Expr::Binding(name) => {
-                match binds.get(name).unwrap() {
-                    VNode::String(s) => Expr::Value(Value::String(s.clone())),
-                    VNode::Number(n) => Expr::Value(Value::Number(*n)),
-                    _ => expr.clone(), // If the replacement is not a simple value, keep the original
+                if let Some(replacement) = binds.get(name) {
+                    match replacement {
+                        VNode::String(s) => return Expr::Value(Value::String(s.clone())),
+                        VNode::Number(n) => return Expr::Value(Value::Number(*n)),
+                        _ => expr.clone(), // If the replacement is not a simple value, keep the original
+                    }
+                } else {
+                    expr.clone()
                 }
             }
             Expr::Binary {

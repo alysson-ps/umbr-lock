@@ -2,23 +2,24 @@ use std::sync::mpsc::Sender;
 
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
-use crate::state::PasswordBuffer;
+use crate::UiRuntime;
 use crate::types::{EventKeys, UiMessage};
 
-pub fn listen_for_keyboard_events(
-    event: EventKeys,
-    password: &mut PasswordBuffer,
-    sender: &Sender<UiMessage>,
-) {
+pub fn listen_for_keyboard_events(event: EventKeys, runtime: &mut UiRuntime) {
     match event {
         EventKeys::Pressed { event } => match event.keysym {
             Keysym::Return => {
-                let passwd = String::from_utf8_lossy(&password.bytes).to_string();
+                let passwd =
+                    String::from_utf8_lossy(&runtime.buffer.as_ref().unwrap().bytes).to_string();
 
-                sender
-                    .send(UiMessage::UnlockWithPassword {
-                        password: passwd,
-                    })
+                dbg!(&passwd);
+                dbg!(&runtime.layout);
+
+                runtime
+                    .sender
+                    .as_ref()
+                    .unwrap()
+                    .send(UiMessage::UnlockWithPassword { password: passwd })
                     .unwrap();
             }
             Keysym::BackSpace => {
@@ -44,7 +45,15 @@ pub fn listen_for_keyboard_events(
             // Handle printable characters
             _ => {
                 if let Some(utf8) = event.utf8 {
-                    password.insert_char(utf8.chars().next().unwrap());
+                    let passwd_len = runtime.buffer.as_ref().unwrap().bytes.len();
+
+                    runtime
+                        .buffer
+                        .as_mut()
+                        .unwrap()
+                        .insert_char(utf8.chars().next().unwrap());
+
+                    runtime.update_count(passwd_len + 1);
                 }
             }
         },

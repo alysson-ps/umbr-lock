@@ -368,11 +368,5 @@ pub fn parser(code: &str) -> Option<Uheex> {
             .unwrap();
     }
 
-    if let Some(mut result) = result {
-        result.evaluate();
-
-        Some(result)
-    } else {
-        None
-    }
+    result
 }

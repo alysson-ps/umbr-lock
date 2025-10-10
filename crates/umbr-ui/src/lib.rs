@@ -1,12 +1,13 @@
 extern crate gdk;
 extern crate gtk;
 
-use gdk::keys::constants::l;
+use gdk::keys::constants::{U, l};
 use gio::prelude::*;
 use gtk::{Overlay, Widget, prelude::*};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::Duration;
 
 use gtk::{Box as GtkBox, Label, OffscreenWindow, Orientation};
 
@@ -24,21 +25,61 @@ pub mod types;
 pub mod win;
 
 pub struct UiRuntime {
-    buffer: PasswordBuffer,
+    layout: Uheex,
+    original_layout: Option<Uheex>,
+    buffer: Option<PasswordBuffer>,
     sender: Option<Sender<UiMessage>>,
     receiver: Option<Receiver<WindowingMessage>>,
     running: bool,
 }
 
 impl UiRuntime {
+    pub fn new() -> Self {
+        Self {
+            layout: Uheex {
+                globals: vec![],
+                root: VNode::Empty,
+                stylesheet: None,
+            },
+            original_layout: None,
+            buffer: None,
+            sender: None,
+            receiver: None,
+            running: false,
+        }
+    }
+
+    pub fn set_layout(&mut self, layout: Uheex) {
+        self.original_layout = Some(layout.clone());
+
+        self.update_count(0);
+    }
+
+    pub fn update_count(&mut self, count: usize) {
+        if let Some(original) = &self.original_layout {
+            let mut updated = original.clone();
+
+            updated.globals.push(VNode::Variable {
+                name: "count".into(),
+                initial: Some(Expr::Value(Value::Number(0 as f64))),
+                value: Expr::Value(Value::Number(count as f64)),
+                interval: Duration::from_secs(1),
+            });
+
+            updated.evaluate();
+
+            self.layout = updated;
+        }
+    }
+
     pub fn standard(
-        styles: Uheex,
+        &mut self,
         sender: Sender<UiMessage>,
         receiver: Receiver<WindowingMessage>,
     ) -> Anyresult<Self> {
         let (w, h) = wait_configure_and_render(&receiver)?;
 
-        let pixbuf = convert_to_pixels(styles, w, h);
+        let pixbuf = convert_to_pixels(&self.layout, w, h);
 
         sender
             .send(UiMessage::Render {
@@ -51,22 +92,26 @@ impl UiRuntime {
             .unwrap();
 
         Ok(Self {
-            buffer: PasswordBuffer::new(),
+            layout: self.layout.clone(),
+            original_layout: Some(self.layout.clone()),
+            buffer: Some(PasswordBuffer::new()),
             sender: Some(sender),
             receiver: Some(receiver),
             running: true,
         })
     }
 
-    pub fn preview(styles: Uheex) -> Anyresult<Self> {
+    pub fn preview(&mut self) -> Anyresult<Self> {
         let app = gtk::Application::new(
             Some("com.example.UmbrPreview"),
             gio::ApplicationFlags::empty(),
         )
         .expect("Initialization failed...");
 
+        let self_clone = self.layout.clone();
+
         app.connect_activate(move |app| {
-            if let Some(css) = styles.generate_css() {
+            if let Some(css) = self_clone.generate_css() {
                 let provider = gtk::CssProvider::new();
 
                 provider
@@ -86,7 +131,7 @@ impl UiRuntime {
             window.set_resizable(false);
             window.set_decorated(false);
 
-            if let Some(layout) = create_layout(styles.clone()) {
+            if let Some(layout) = create_layout(&self_clone) {
                 window.add(&layout);
             }
 
@@ -101,7 +146,9 @@ impl UiRuntime {
         app.run(&[]);
 
         Ok(Self {
-            buffer: PasswordBuffer::new(),
+            layout: self.layout.clone(),
+            original_layout: Some(self.layout.clone()),
+            buffer: None,
             sender: None,
             receiver: None,
             running: false,
@@ -113,11 +160,7 @@ impl UiRuntime {
             return Ok(());
         }
 
-        match receive_messages(
-            &mut self.buffer,
-            &self.receiver.as_ref().unwrap(),
-            &self.sender.as_ref().unwrap(),
-        )? {
+        match receive_messages(self)? {
             MessageLoopState::Continue => Ok(()),
             MessageLoopState::Stop => {
                 self.running = false;
@@ -136,21 +179,24 @@ pub fn mount_ui_standard(
     sender: Sender<UiMessage>,
     receiver: Receiver<WindowingMessage>,
 ) -> Anyresult<UiRuntime> {
-    UiRuntime::standard(styles, sender, receiver)
+    let mut runtime = UiRuntime::new();
+    runtime.set_layout(styles);
+    runtime.standard(sender, receiver)
 }
 
 pub fn mount_ui_preview(styles: Uheex) -> Anyresult<UiRuntime> {
-    UiRuntime::preview(styles)
+    let mut runtime = UiRuntime::new();
+    runtime.set_layout(styles);
+    runtime.preview()
 }
 
 fn handle_message(
-    buffer: &mut PasswordBuffer,
+    runtime: &mut UiRuntime,
     message: WindowingMessage,
-    sender: &Sender<UiMessage>,
 ) -> Anyresult<MessageLoopState> {
     match message {
         WindowingMessage::GtkEvent(e) => {
-            listen_for_keyboard_events(e, buffer, sender);
+            listen_for_keyboard_events(e, runtime);
         }
         WindowingMessage::UnlockFailed(message) => {
             dbg!(&message);
@@ -164,16 +210,12 @@ fn handle_message(
     Ok(MessageLoopState::Continue)
 }
 
-fn receive_messages(
-    buffer: &mut PasswordBuffer,
-    receiver: &Receiver<WindowingMessage>,
-    sender: &Sender<UiMessage>,
-) -> Anyresult<MessageLoopState> {
+fn receive_messages(runtime: &mut UiRuntime) -> Anyresult<MessageLoopState> {
     loop {
-        let message = receiver.try_recv();
+        let message = runtime.receiver.as_ref().unwrap().try_recv();
         match message {
             Ok(message) => {
-                if let MessageLoopState::Stop = handle_message(buffer, message, sender)? {
+                if let MessageLoopState::Stop = handle_message(runtime, message)? {
                     return Ok(MessageLoopState::Stop);
                 }
             }
@@ -212,8 +254,8 @@ struct Options {
     anchor: Option<(gtk::Align, gtk::Align)>,
 }
 
-fn create_layout(uheex: Uheex) -> Option<Widget> {
-    if let VNode::Window { attributes, child } = uheex.root {
+fn create_layout(uheex: &Uheex) -> Option<Widget> {
+    if let VNode::Window { attributes, child } = &uheex.root {
         let monitor = attributes.get("monitor").and_then(|s| match s {
             Expr::Value(Value::Number(v)) => Some(*v as i32),
             _ => None,
@@ -415,7 +457,7 @@ where
             None
         }
 
-        _ => unimplemented!("Only widget nodes are supported"),
+        _ => None,
     }
 }
 
@@ -503,7 +545,7 @@ where
     }
 }
 
-fn convert_to_pixels(layout: Uheex, width: u32, height: u32) -> PixbufSnapshot {
+fn convert_to_pixels(layout: &Uheex, width: u32, height: u32) -> PixbufSnapshot {
     gtk::init().expect("Failed to initialize GTK.");
 
     let offscreen = OffscreenWindow::new();

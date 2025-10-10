@@ -1,6 +1,5 @@
 ;; Globals Variables
 (declare
-    (variable :name 'count' (5))
     (variable :name 'dot' ('•'))
     (variable :name 'username' $('whoami'))
 )

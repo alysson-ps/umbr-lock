@@ -1,13 +1,13 @@
 use smithay_client_toolkit::seat::keyboard::KeyEvent;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WindowingMessage {
     GtkEvent(EventKeys),
     Ready { width: u32, height: u32 },
     UnlockFailed(String),
     Quit,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EventKeys {
     Pressed { event: KeyEvent },
     Released { event: KeyEvent },
