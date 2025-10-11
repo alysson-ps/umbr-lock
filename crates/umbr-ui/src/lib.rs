@@ -5,11 +5,13 @@ use gdk::keys::constants::{U, l};
 use gio::prelude::*;
 use gtk::{Overlay, Widget, prelude::*};
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
-use gtk::{Box as GtkBox, Label, OffscreenWindow, Orientation};
+use gtk::{Box as GtkBox, Label, Orientation};
 
 use uheex::types::{Expr, Uheex, VNode, Value, WidgetKind};
 use umbr_core::{Anyresult, UmbrError};
@@ -34,6 +36,7 @@ pub struct UiRuntime {
     render_dimensions: Option<(u32, u32)>,
     count_global_index: Option<usize>,
     last_count: Option<usize>,
+    renderer: Option<GtkRenderer>,
 }
 
 impl UiRuntime {
@@ -52,6 +55,7 @@ impl UiRuntime {
             render_dimensions: None,
             count_global_index: None,
             last_count: None,
+            renderer: None,
         }
     }
 
@@ -97,18 +101,26 @@ impl UiRuntime {
             self.last_count = Some(count);
 
             if self.running {
-                if let (Some((width, height)), Some(sender)) =
-                    (self.render_dimensions, self.sender.as_ref())
-                {
-                    let pixbuf = convert_to_pixels(&self.layout, width, height);
-                    if let Err(err) = sender.send(UiMessage::Render {
-                        width: pixbuf.width,
-                        height: pixbuf.height,
-                        stride: pixbuf.stride,
-                        n_channels: pixbuf.n_channels,
-                        pixels: pixbuf.pixels,
-                    }) {
-                        eprintln!("Failed to send re-render message: {err}");
+                if let (Some((width, height)), Some(sender), Some(renderer)) = (
+                    self.render_dimensions,
+                    self.sender.as_ref(),
+                    self.renderer.as_mut(),
+                ) {
+                    match renderer.render(&self.layout, width, height) {
+                        Ok(pixbuf) => {
+                            if let Err(err) = sender.send(UiMessage::Render {
+                                width: pixbuf.width,
+                                height: pixbuf.height,
+                                stride: pixbuf.stride,
+                                n_channels: pixbuf.n_channels,
+                                pixels: pixbuf.pixels,
+                            }) {
+                                eprintln!("Failed to send re-render message: {err}");
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("Failed to re-render layout: {err}");
+                        }
                     }
                 }
             }
@@ -119,34 +131,37 @@ impl UiRuntime {
         &mut self,
         sender: Sender<UiMessage>,
         receiver: Receiver<WindowingMessage>,
-    ) -> Anyresult<Self> {
+    ) -> Anyresult<()> {
         let (w, h) = wait_configure_and_render(&receiver)?;
 
         self.render_dimensions = Some((w, h));
 
-        let pixbuf = convert_to_pixels(&self.layout, w, h);
+        if self.renderer.is_none() {
+            self.renderer = Some(GtkRenderer::new(w, h)?);
+        }
 
-        sender
-            .send(UiMessage::Render {
-                width: pixbuf.width,
-                height: pixbuf.height,
-                stride: pixbuf.stride,
-                n_channels: pixbuf.n_channels,
-                pixels: pixbuf.pixels,
-            })
-            .unwrap();
+        if let Some(renderer) = self.renderer.as_mut() {
+            let pixbuf = renderer.render(&self.layout, w, h)?;
 
-        Ok(Self {
-            layout: self.layout.clone(),
-            original_layout: self.original_layout.clone(),
-            buffer: Some(PasswordBuffer::new()),
-            sender: Some(sender),
-            receiver: Some(receiver),
-            running: true,
-            render_dimensions: Some((w, h)),
-            count_global_index: self.count_global_index,
-            last_count: self.last_count,
-        })
+            sender
+                .send(UiMessage::Render {
+                    width: pixbuf.width,
+                    height: pixbuf.height,
+                    stride: pixbuf.stride,
+                    n_channels: pixbuf.n_channels,
+                    pixels: pixbuf.pixels,
+                })
+                .map_err(|err| {
+                    UmbrError::Generic(format!("failed to send render message: {err}"))
+                })?;
+        }
+
+        self.buffer = Some(PasswordBuffer::new());
+        self.sender = Some(sender);
+        self.receiver = Some(receiver);
+        self.running = true;
+
+        Ok(())
     }
 
     pub fn preview(&mut self) -> Anyresult<Self> {
@@ -203,6 +218,7 @@ impl UiRuntime {
             render_dimensions: None,
             count_global_index: self.count_global_index,
             last_count: self.last_count,
+            renderer: None,
         })
     }
 
@@ -258,7 +274,8 @@ pub fn mount_ui_standard(
 ) -> Anyresult<UiRuntime> {
     let mut runtime = UiRuntime::new();
     runtime.set_layout(styles);
-    runtime.standard(sender, receiver)
+    runtime.standard(sender, receiver)?;
+    Ok(runtime)
 }
 
 pub fn mount_ui_preview(styles: Uheex) -> Anyresult<UiRuntime> {
@@ -323,6 +340,96 @@ struct PixbufSnapshot {
     height: i32,
     stride: i32,
     n_channels: i32,
+}
+
+struct GtkRenderer {
+    offscreen: gtk::OffscreenWindow,
+    css_provider: gtk::CssProvider,
+    css_signature: Option<u64>,
+}
+
+impl GtkRenderer {
+    fn new(width: u32, height: u32) -> Anyresult<Self> {
+        if !gtk::is_initialized() {
+            gtk::init().map_err(|err| UmbrError::Generic(err.to_string()))?;
+        }
+
+        let offscreen = gtk::OffscreenWindow::new();
+        offscreen.set_default_size(width as i32, height as i32);
+
+        let css_provider = gtk::CssProvider::new();
+
+        Ok(Self {
+            offscreen,
+            css_provider,
+            css_signature: None,
+        })
+    }
+
+    fn ensure_css(&mut self, css: Option<&str>) {
+        match css {
+            Some(css) => {
+                let mut hasher = DefaultHasher::new();
+                css.hash(&mut hasher);
+                let signature = hasher.finish();
+
+                if self.css_signature != Some(signature) {
+                    if let Err(err) = self.css_provider.load_from_data(css.as_bytes()) {
+                        eprintln!("Failed to load CSS: {err}");
+                    } else if let Some(screen) = gdk::Screen::get_default() {
+                        gtk::StyleContext::add_provider_for_screen(
+                            &screen,
+                            &self.css_provider,
+                            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                        );
+                        self.css_signature = Some(signature);
+                    }
+                }
+            }
+            None => {
+                self.css_signature = None;
+            }
+        }
+    }
+
+    fn render(&mut self, layout: &Uheex, width: u32, height: u32) -> Anyresult<PixbufSnapshot> {
+        self.offscreen.set_default_size(width as i32, height as i32);
+
+        self.ensure_css(layout.generate_css().as_deref());
+
+        for child in self.offscreen.get_children() {
+            self.offscreen.remove(&child);
+        }
+
+        if let Some(widget) = create_layout(layout) {
+            self.offscreen.add(&widget);
+        }
+
+        self.offscreen.show_all();
+
+        while gtk::events_pending() {
+            gtk::main_iteration();
+        }
+
+        let buffer = self
+            .offscreen
+            .get_pixbuf()
+            .ok_or_else(|| UmbrError::Generic("offscreen window did not produce pixbuf".into()))?;
+
+        let width = buffer.get_width();
+        let height = buffer.get_height();
+        let stride = buffer.get_rowstride();
+        let n_channels = buffer.get_n_channels();
+        let pixels = unsafe { buffer.get_pixels().to_vec() };
+
+        Ok(PixbufSnapshot {
+            pixels,
+            width,
+            height,
+            stride,
+            n_channels,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -619,53 +726,5 @@ where
     if let Some((h_align, v_align)) = align.or(options.anchor) {
         widget.set_halign(h_align);
         widget.set_valign(v_align);
-    }
-}
-
-fn convert_to_pixels(layout: &Uheex, width: u32, height: u32) -> PixbufSnapshot {
-    gtk::init().expect("Failed to initialize GTK.");
-
-    let offscreen = OffscreenWindow::new();
-
-    offscreen.set_default_size(width as i32, height as i32);
-
-    if let Some(css) = layout.generate_css() {
-        let provider = gtk::CssProvider::new();
-
-        provider
-            .load_from_data(css.as_bytes())
-            .expect("Failed to load CSS");
-
-        gtk::StyleContext::add_provider_for_screen(
-            &gdk::Screen::get_default().expect("Error initializing gtk css provider."),
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-
-    if let Some(layout) = create_layout(layout) {
-        offscreen.add(&layout);
-    }
-
-    offscreen.show_all();
-
-    while gtk::events_pending() {
-        gtk::main_iteration();
-    }
-
-    let buffer = offscreen.get_pixbuf().unwrap();
-
-    let width = buffer.get_width();
-    let height = buffer.get_height();
-    let stride = buffer.get_rowstride();
-    let n_channels = buffer.get_n_channels();
-    let pixels = unsafe { buffer.get_pixels().to_vec() };
-
-    PixbufSnapshot {
-        pixels,
-        width,
-        height,
-        stride,
-        n_channels,
     }
 }
