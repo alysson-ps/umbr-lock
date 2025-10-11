@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gtk = "0.9"          # Ou a versão estável mais recente da série gtk3
-gdk = "0.13"         # Para manipulação de superfícies, eventos, etc
-gio = "0.9"         # Para integração com o sistema de arquivos e outras funcionalidades do GLib
-gdk-pixbuf = "0.14"  # Para salvar e manipular Pixbuf (buffer de pixels)
+# GPU renderer and preview window
+wgpu = "0.19"
+winit = { version = "0.28", features = ["wayland", "rwh_06"] }
+pollster = "0.3"
+bytemuck = { version = "1.15", features = ["derive"] }
 
 # gtk4-layer-shell = "0.6.3"
 uheex = { path = "../uheex", default-features = false }
