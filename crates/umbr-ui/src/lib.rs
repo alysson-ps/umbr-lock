@@ -32,6 +32,8 @@ pub struct UiRuntime {
     receiver: Option<Receiver<WindowingMessage>>,
     running: bool,
     render_dimensions: Option<(u32, u32)>,
+    count_global_index: Option<usize>,
+    last_count: Option<usize>,
 }
 
 impl UiRuntime {
@@ -48,45 +50,51 @@ impl UiRuntime {
             receiver: None,
             running: false,
             render_dimensions: None,
+            count_global_index: None,
+            last_count: None,
         }
     }
 
-    pub fn set_layout(&mut self, layout: Uheex) {
-        self.original_layout = Some(layout.clone());
+    pub fn set_layout(&mut self, mut layout: Uheex) {
+        let index = ensure_count_variable(&mut layout, 0);
 
-        self.update_count(0);
+        self.original_layout = Some(layout.clone());
+        self.count_global_index = Some(index);
+        self.last_count = Some(0);
+
+        self.layout = layout;
+        self.layout.evaluate();
     }
 
     pub fn update_count(&mut self, count: usize) {
-        if let Some(original) = &self.original_layout {
-            let mut updated = original.clone();
-            let mut found = false;
+        if self.last_count == Some(count) {
+            return;
+        }
 
-            for global in updated.globals.iter_mut() {
-                if let VNode::Variable { name, value, .. } = global {
-                    if name == "count" {
-                        *value = Expr::Value(Value::Number(count as f64));
-                        found = true;
-                        break;
-                    }
+        if let Some(original) = self.original_layout.as_mut() {
+            let index = match self.count_global_index {
+                Some(index)
+                    if matches!(
+                        original.globals.get(index),
+                        Some(VNode::Variable { name, .. }) if name == "count"
+                    ) =>
+                {
+                    index
                 }
+                _ => {
+                    let index = ensure_count_variable(original, count);
+                    self.count_global_index = Some(index);
+                    index
+                }
+            };
+
+            if let Some(VNode::Variable { value, .. }) = original.globals.get_mut(index) {
+                *value = Expr::Value(Value::Number(count as f64));
             }
 
-            if !found {
-                updated.globals.push(VNode::Variable {
-                    name: "count".into(),
-                    initial: Some(Expr::Value(Value::Number(0 as f64))),
-                    value: Expr::Value(Value::Number(count as f64)),
-                    interval: Duration::from_secs(1),
-                });
-            }
-
-            self.original_layout = Some(updated.clone());
-
-            let mut evaluated = updated;
-            evaluated.evaluate();
-
-            self.layout = evaluated;
+            self.layout = original.clone();
+            self.layout.evaluate();
+            self.last_count = Some(count);
 
             if self.running {
                 if let (Some((width, height)), Some(sender)) =
@@ -136,6 +144,8 @@ impl UiRuntime {
             receiver: Some(receiver),
             running: true,
             render_dimensions: Some((w, h)),
+            count_global_index: self.count_global_index,
+            last_count: self.last_count,
         })
     }
 
@@ -191,6 +201,8 @@ impl UiRuntime {
             receiver: None,
             running: false,
             render_dimensions: None,
+            count_global_index: self.count_global_index,
+            last_count: self.last_count,
         })
     }
 
@@ -210,6 +222,32 @@ impl UiRuntime {
 
     pub fn is_running(&self) -> bool {
         self.running
+    }
+}
+
+fn ensure_count_variable(layout: &mut Uheex, count: usize) -> usize {
+    if let Some((index, node)) = layout
+        .globals
+        .iter_mut()
+        .enumerate()
+        .find(|(_, node)| matches!(node, VNode::Variable { name, .. } if name == "count"))
+    {
+        if let VNode::Variable { value, initial, .. } = node {
+            let expr = Expr::Value(Value::Number(count as f64));
+            *value = expr.clone();
+            *initial = Some(expr);
+        }
+
+        index
+    } else {
+        layout.globals.push(VNode::Variable {
+            name: "count".into(),
+            initial: Some(Expr::Value(Value::Number(count as f64))),
+            value: Expr::Value(Value::Number(count as f64)),
+            interval: Duration::from_secs(1),
+        });
+
+        layout.globals.len() - 1
     }
 }
 

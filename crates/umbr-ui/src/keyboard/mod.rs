@@ -16,9 +16,6 @@ pub fn listen_for_keyboard_events(event: EventKeys, runtime: &mut UiRuntime) {
                         .map(|buffer| buffer.as_string())
                         .unwrap_or_default();
 
-                    dbg!(&passwd);
-                    dbg!(&runtime.layout);
-
                     runtime
                         .sender
                         .as_ref()
