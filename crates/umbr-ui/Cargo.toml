@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # GPU renderer and preview window
 wgpu = "0.19"
-winit = { version = "0.28", features = ["wayland", "rwh_06"] }
+winit = { version = "0.29", default-features = false, features = ["wayland", "rwh_06"] }
 pollster = "0.3"
 bytemuck = { version = "1.15", features = ["derive"] }
 

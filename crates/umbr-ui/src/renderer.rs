@@ -6,12 +6,11 @@ use uheex::types::{Declaration, Expr, Stylesheet, Uheex, VNode, Value, WidgetKin
 use umbr_core::{Anyresult, UmbrError};
 use wgpu::util::DeviceExt;
 use wgpu::{Device, Queue};
-use winit::dpi::PhysicalSize;
-use winit::event::Event;
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::run_return::EventLoopExtRunReturn;
-use winit::window::{Window, WindowBuilder};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::{Window, WindowAttributes, WindowId};
 
 #[derive(Debug, Clone)]
 pub struct FrameSnapshot {
@@ -1787,44 +1786,96 @@ impl PreviewRenderer {
 }
 
 pub fn run_preview(layout: &Uheex) -> Anyresult<()> {
-    let event_loop = EventLoop::new().map_err(|err| UmbrError::Generic(err.to_string()))?;
-    let window = WindowBuilder::new()
-        .with_title("Umbr Locker Preview")
-        .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 560.0))
-        .with_resizable(false)
-        .build(&event_loop)
-        .map_err(|err| UmbrError::Generic(err.to_string()))?;
+    struct PreviewApp {
+        layout: Uheex,
+        renderer: Option<PreviewRenderer>,
+        window: Option<Window>,
+        window_id: Option<WindowId>,
+        render_failed: Option<String>,
+    }
 
-    let mut renderer = PreviewRenderer::new(&window)?;
-    let layout_clone = layout.clone();
+    impl ApplicationHandler for PreviewApp {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let attributes = WindowAttributes::default()
+                .with_title("Umbr Locker Preview")
+                .with_inner_size(LogicalSize::new(1000.0, 560.0))
+                .with_resizable(false);
 
-    let mut control_flow = ControlFlow::Poll;
+            match event_loop.create_window(attributes) {
+                Ok(window) => {
+                    self.window_id = Some(window.id());
+                    let renderer = match PreviewRenderer::new(&window) {
+                        Ok(renderer) => Some(renderer),
+                        Err(err) => {
+                            self.render_failed = Some(err.to_string());
+                            None
+                        }
+                    };
 
-    event_loop.run_return(|event, _, flow| {
-        *flow = control_flow;
-        match event {
-            Event::WindowEvent { event, .. } => match event {
+                    self.renderer = renderer;
+                    self.window = Some(window);
+                }
+                Err(err) => {
+                    self.render_failed = Some(err.to_string());
+                    event_loop.exit();
+                }
+            }
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            window_id: WindowId,
+            event: WindowEvent,
+        ) {
+            if Some(window_id) != self.window_id {
+                return;
+            }
+
+            match event {
                 WindowEvent::CloseRequested => {
-                    *flow = ControlFlow::Exit;
+                    event_loop.exit();
                 }
                 WindowEvent::Resized(new_size) => {
-                    renderer.resize(new_size);
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.resize(new_size);
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        if let Err(err) = renderer.render(&self.layout) {
+                            self.render_failed = Some(err.to_string());
+                            event_loop.exit();
+                        }
+                    }
                 }
                 _ => {}
-            },
-            Event::RedrawRequested(_) => {
-                if let Err(err) = renderer.render(&layout_clone) {
-                    eprintln!("Preview render failed: {err}");
-                    *flow = ControlFlow::Exit;
-                }
             }
-            Event::MainEventsCleared => {
+        }
+
+        fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+            if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
-            _ => {}
         }
-        control_flow = *flow;
-    });
+    }
+
+    let event_loop = EventLoop::new().map_err(|err| UmbrError::Generic(err.to_string()))?;
+    let mut app = PreviewApp {
+        layout: layout.clone(),
+        renderer: None,
+        window: None,
+        window_id: None,
+        render_failed: None,
+    };
+
+    if let Err(err) = event_loop.run_app(&mut app) {
+        return Err(UmbrError::Generic(err.to_string()));
+    }
+
+    if let Some(err) = app.render_failed {
+        return Err(UmbrError::Generic(err));
+    }
 
     Ok(())
 }
