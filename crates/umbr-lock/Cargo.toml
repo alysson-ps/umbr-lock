@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.47", features = ["derive"] }
+tokio = { version = "1.36", features = ["full"] }
 
 umbr-core = { path = "../umbr-core" }
 umbr-ui = { path = "../umbr-ui" }

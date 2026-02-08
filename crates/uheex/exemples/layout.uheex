@@ -1,33 +1,35 @@
 ;; Globals Variables
 (declare
-    (variable :name 'count' (5))
     (variable :name 'dot' ('•'))
     (variable :name 'username' $('whoami'))
 )
 
 ;; Layout
-(window :monitor 0 :anchor ['center', 'center']
+(window :monitor 0 :background '#000' :anchor ['center', 'center']
     (column :class 'container'
-        (column :class 'box' :flexible true :size [300, 20] 
-            (absolute :x '-50' :y '-50'
-                (label :class 'title' ('Authenticate into Arch Linux'))
+        (rectangle :border-width '2px' :width '20%' :height '200px'
+            ;; Title
+            (label :class 'title' :absolute ['12px', '-9px'] 
+                ('Authenticate into Arch Linux')
             )
 
-            ;; Line username
-            (row :align ['start', 'center'] 
-                (label :class 'label' ('Username: '))
-                (label :class 'username' (&username))
-            )
+            (column :class 'box' :align 'center' :spacing 10 :padding '12px' 
+                ;; Line username
+                (row :align 'start' :spacing 10
+                    (label :class 'label' ('Username: '))
+                    (label :class 'username' (&username))
+                )
 
-            ;; Line password
-            (row :align ['start', 'center']
-                (label :class 'label' ('Password: '))
-                            
-                ;; Dots
-                (then :cond (&count > 0) 
-                    (row :class 'dots' :spacing 2
-                        (repeat :times &count
-                            (label :class 'dot' (&dot))
+                ;; Line password
+                (row :align 'start' :spacing 10
+                    (label :class 'label' ('Password: '))
+
+                    ;; Dots
+                    (then :cond (&count > 0) 
+                        (row :class 'dots' :spacing 2
+                            (repeat :times &count
+                                (label :class 'dot' (&dot))
+                            )
                         )
                     )
                 )

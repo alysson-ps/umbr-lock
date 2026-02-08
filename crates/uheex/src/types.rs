@@ -1,7 +1,7 @@
 use core::fmt;
 use logos::Logos;
 use std::collections::BTreeMap;
-use std::process::Command;
+use std::process::{Command, exit};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -152,18 +152,361 @@ pub struct Uheex {
 }
 
 impl Uheex {
-    pub fn generate_css(&self) -> Option<String> {
-        if let Some(stylesheet) = &self.stylesheet {
-            let mut css = String::new();
+    const BASE_LAYOUT: &str = r#"
+    import { LineEdit } from "std-widgets.slint";
+    export component BaseLayout inherits Window {
+    
+    in-out property<string> passwd <=> password.text;
 
-            stylesheet.rules.iter().for_each(|rule| {
-                css.push_str(&rule.to_css());
-            });
+    callback submit <=> password.accepted;
 
-            Some(css)
-        } else {
-            None
+    forward-focus: password;
+
+    Rectangle {
+        opacity: 0;
+        clip: true;
+        width: 10px;
+        height: 10px;
+
+        password := LineEdit {
+            enabled: true;
+            placeholder-text: "Enter password";
+            input-type: InputType.password;
         }
+    }
+
+    "#;
+
+    pub fn to_slint(&self) -> String {
+        let mut slint_code = String::new();
+
+        slint_code.push_str(Self::BASE_LAYOUT);
+
+        self.globals.iter().for_each(|node| match node {
+            VNode::Variable {
+                name,
+                initial,
+                value,
+                ..
+            } => {
+                match value {
+                    Expr::Value(Value::String(s)) => {
+                        slint_code
+                            .push_str(&format!("in-out property<string> {}: \"{}\";\n", name, s));
+                    }
+                    Expr::Value(Value::Number(n)) => {
+                        slint_code.push_str(&format!("in-out property<int> {}: {};\n", name, n));
+                    }
+                    _ => {}
+                };
+            }
+            _ => {}
+        });
+
+        slint_code.push_str(self.vnode_to_slint(&self.root, 0).as_str());
+
+        slint_code.push_str("}");
+
+        slint_code
+    }
+
+    fn vnode_to_slint(&self, node: &VNode, indent: usize) -> String {
+        let mut slint_code = String::new();
+        let indent_str = "    ".repeat(indent);
+
+        match node.clone() {
+            VNode::Window { attributes, child } => {
+                let background = match attributes.get("background") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "#151515".to_string(),
+                };
+
+                slint_code.push_str(&format!("{}Rectangle {{\n", indent_str));
+                slint_code.push_str(&format!(
+                    "{}background: {};\n",
+                    "    ".repeat(indent + 1),
+                    background
+                ));
+
+                let (anchor_x, anchor_y) = match attributes.get("anchor") {
+                    Some(Expr::Array(arr)) => {
+                        let x = match arr.get(0) {
+                            Some(Expr::Value(Value::String(s))) => s.clone(),
+                            _ => "center".to_string(),
+                        };
+                        let y = match arr.get(1) {
+                            Some(Expr::Value(Value::String(s))) => s.clone(),
+                            _ => "center".to_string(),
+                        };
+                        (x, y)
+                    }
+                    _ => ("center".to_string(), "center".to_string()),
+                };
+
+                slint_code.push_str(&format!(
+                    "{}HorizontalLayout {{\n",
+                    "    ".repeat(indent + 1)
+                ));
+                slint_code.push_str(&format!(
+                    "{}alignment: {}; \n",
+                    "        ".repeat(indent + 1),
+                    anchor_x
+                ));
+                
+                slint_code.push_str(&format!(
+                    "{}VerticalLayout {{\n",
+                    "        ".repeat(indent + 1)
+                ));
+                slint_code.push_str(&format!(
+                    "{}alignment: {}; \n",
+                    "            ".repeat(indent + 1),
+                    anchor_y
+                ));
+
+                child.iter().for_each(|c| {
+                    slint_code.push_str(&self.vnode_to_slint(c, indent + 1));
+                });
+                
+                slint_code.push_str("}}\n");
+                slint_code.push_str(&format!("{}}}\n", indent_str));
+            }
+
+            VNode::Widget {
+                kind,
+                attributes,
+                child,
+            } => {
+                match kind {
+                    WidgetKind::Label => {
+
+                        slint_code.push_str(&format!("{}Text {{\n", indent_str));
+
+                        let chd = self.vnode_to_slint(&child.first().unwrap(), indent + 1);
+
+                        slint_code.push_str(&format!(
+                            "{}text: {};\n",
+                            "    ".repeat(indent + 1),
+                            chd.trim()
+                        ));
+
+                        let attrs = self.mount_attrs_by_kind(&kind, &attributes);
+                        slint_code.push_str(&format!("{}{}\n", "    ".repeat(indent + 1), attrs));
+
+                        slint_code.push_str(&format!("{}}}\n", indent_str));
+                    }
+                    WidgetKind::Row => {
+                        slint_code.push_str(&format!("{}HorizontalLayout {{\n", indent_str));
+
+                        let attrs = self.mount_attrs_by_kind(&kind, &attributes);
+
+                        slint_code.push_str(&format!("{}{}\n", "    ".repeat(indent + 1), attrs));
+
+                        child.iter().for_each(|c| {
+                            slint_code.push_str(&self.vnode_to_slint(c, indent + 1));
+                        });
+
+                        slint_code.push_str(&format!("{}}}\n", indent_str));
+                    }
+                    WidgetKind::Column => {
+                        slint_code.push_str(&format!("{}VerticalLayout {{\n", indent_str));
+
+                        let attrs = self.mount_attrs_by_kind(&kind, &attributes);
+
+                        slint_code.push_str(&format!("{}{}\n", "    ".repeat(indent + 1), attrs));
+
+                        child.iter().for_each(|c| {
+                            slint_code.push_str(&self.vnode_to_slint(c, indent + 1));
+                        });
+
+                        slint_code.push_str(&format!("{}}}\n", indent_str));
+                    }
+                    WidgetKind::Rectangle => {
+                        slint_code.push_str(&format!("{}Rectangle {{\n", indent_str));
+
+                        let attrs = self.mount_attrs_by_kind(&kind, &attributes);
+
+                        slint_code.push_str(&format!("{}{}\n", "    ".repeat(indent + 1), attrs));
+
+                        child.iter().for_each(|c| {
+                            slint_code.push_str(&self.vnode_to_slint(c, indent + 1));
+                        });
+
+                        slint_code.push_str(&format!("{}}}\n", indent_str));
+                    }
+                    _ => { /* Handle other widget kinds if needed */ }
+                }
+            }
+            VNode::Then { cond, child } => {
+                slint_code.push_str(&format!("{}if (", indent_str));
+                // Note: This is a simplified representation of the condition
+                if let Expr::Binary {
+                    left,
+                    operator,
+                    right,
+                } = cond.as_ref()
+                {
+                    let left_str = match left.as_ref() {
+                        Expr::Value(Value::String(s)) => format!("\"{}\"", s),
+                        Expr::Value(Value::Number(n)) => n.to_string(),
+                        Expr::Binding(name) if name == "count" => {
+                            "passwd.character-count".to_string()
+                        }
+                        _ => "<expr>".to_string(),
+                    };
+
+                    let right_str = match right.as_ref() {
+                        Expr::Value(Value::String(s)) => format!("\"{}\"", s),
+                        Expr::Value(Value::Number(n)) => n.to_string(),
+                        Expr::Binding(name) if name == "count" => {
+                            "passwd.character-count".to_string()
+                        }
+                        _ => "<expr>".to_string(),
+                    };
+
+                    let op_str = match operator {
+                        BinaryOperator::Eq => "==",
+                        BinaryOperator::NotEq => "!=",
+                        BinaryOperator::Gt => ">",
+                        BinaryOperator::Lt => "<",
+                        BinaryOperator::Gte => ">=",
+                        BinaryOperator::Lte => "<=",
+                        _ => "<op>",
+                    };
+
+                    slint_code.push_str(&format!("{} {} {}", left_str, op_str, right_str));
+                }
+                slint_code.push_str("): ");
+                slint_code.push_str(&self.vnode_to_slint(child.as_ref(), 0));
+                slint_code.push_str(&format!("{}\n", indent_str));
+            }
+
+            VNode::Repeat { times, child } => {
+                slint_code.push_str(&format!("{}for _ in ", indent_str));
+                if let Expr::Value(Value::Number(n)) = times.as_ref() {
+                    slint_code.push_str(&format!("{}", *n as usize));
+                } else if let Expr::Binding(name) = times.as_ref() {
+                    if name == "count" {
+                        slint_code.push_str("passwd.character-count");
+                    }
+                }
+                slint_code.push_str(": ");
+                slint_code.push_str(&self.vnode_to_slint(child.as_ref(), 0));
+                slint_code.push_str(&format!("{}\n", indent_str));
+            }
+
+            VNode::Binding(name) => {
+                slint_code.push_str(&format!("{}{}\n", indent_str, name));
+            }
+            VNode::String(s) => {
+                slint_code.push_str(&format!("\"{}\"\n", s));
+            }
+            _ => { /* Handle other VNode types if needed */ }
+        }
+
+        slint_code
+    }
+
+    fn mount_attrs_by_kind(
+        &self,
+        kind: &WidgetKind,
+        attributes: &BTreeMap<String, Expr>,
+    ) -> String {
+        let mut attrs = String::new();
+
+        match kind {
+            WidgetKind::Label => {
+                let color = match attributes.get("color") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "#FFFFFF".to_string(),
+                };
+
+                if let Some((x, y)) = match attributes.get("absolute") {
+                    Some(Expr::Array(arr)) => {
+                        let x = match arr.get(0) {
+                            Some(Expr::Value(Value::String(s))) => s.clone(),
+                            Some(Expr::Value(Value::Number(n))) => format!("{}px", *n as i32),
+                            _ => "0px".to_string(),
+                        };
+                        let y = match arr.get(1) {
+                            Some(Expr::Value(Value::String(s))) => s.clone(),
+                            Some(Expr::Value(Value::Number(n))) => format!("{}px", *n as i32),
+                            _ => "0px".to_string(),
+                        };
+                        Some((x, y))
+                    }
+                    _ => None,
+                } {
+                    attrs.push_str(&format!("x: {};\n", x));
+                    attrs.push_str(&format!("y: {};\n", y));
+                }
+
+                attrs.push_str(&format!("color: {};\n", color));
+            }
+            WidgetKind::Row => {
+                let align = match attributes.get("align") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "center".to_string(),
+                };
+                attrs.push_str(&format!("alignment: {};\n", align));
+
+                let spacing = match attributes.get("spacing") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "0".to_string(),
+                };
+                attrs.push_str(&format!("spacing: {};\n", spacing));
+
+                let padding = match attributes.get("padding") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "0".to_string(),
+                };
+                attrs.push_str(&format!("padding: {};\n", padding));
+            }
+            WidgetKind::Column => {
+                let align = match attributes.get("align") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "center".to_string(),
+                };
+                attrs.push_str(&format!("alignment: {};\n", align));
+
+                let spacing = match attributes.get("spacing") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "0".to_string(),
+                };
+                attrs.push_str(&format!("spacing: {};\n", spacing));
+
+                let padding = match attributes.get("padding") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "0".to_string(),
+                };
+                attrs.push_str(&format!("padding: {};\n", padding));
+            }
+            WidgetKind::Rectangle => {
+                let width = match attributes.get("width") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "100px".to_string(),
+                };
+
+                attrs.push_str(&format!("width: {};\n", width));
+
+                let height = match attributes.get("height") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "100px".to_string(),
+                };
+
+                attrs.push_str(&format!("height: {};\n", height));
+
+                let background = match attributes.get("background") {
+                    Some(Expr::Value(Value::String(s))) => s.clone(),
+                    _ => "transparent".to_string(),
+                };
+
+                attrs.push_str(&format!("background: {};\n", background));
+            },
+            WidgetKind::Absolute => {}
+            _ => {}
+        }
+
+        attrs
     }
 
     #[cfg(feature = "serde")]
@@ -171,244 +514,36 @@ impl Uheex {
         serde_json::to_string_pretty(self).unwrap()
     }
 
-    pub fn evaluate(&mut self) {
-        // Convert all bindings to their evaluated forms
-        self.resolve_binds();
-
-        if let VNode::Window { child, attributes } = &self.root {
-            let mut new_chd: Box<Vec<VNode>> = child.clone();
-            let new_attrs = attributes.clone();
-
-            new_chd.iter_mut().for_each(|node| {
-                self.evaluate_vnode(node);
-            });
-
-            self.root = VNode::Window {
-                attributes: new_attrs,
-                child: new_chd.clone(),
-            };
-        }
-    }
-
-    fn evaluate_vnode(&mut self, node: &mut VNode) {
-        match node {
-            VNode::Widget { child, .. } => {
-                let mut new_chd: Box<Vec<VNode>> = child.clone();
-                new_chd.iter_mut().for_each(|n| self.evaluate_vnode(n));
-                *child = new_chd;
+    pub fn resolve_vars(&mut self) {
+        self.globals.iter_mut().for_each(|node| {
+            if let VNode::Variable { value, .. } = node {
+                Self::resolve_expr_vars(value);
             }
-            VNode::Then { cond, child } => {
-                if let Expr::Binary {
-                    left,
-                    operator,
-                    right,
-                    ..
-                } = cond.as_ref()
-                {
-                    let val_left = match left.as_ref() {
-                        Expr::Value(Value::String(s)) => s.clone(),
-                        Expr::Value(Value::Number(n)) => n.to_string(),
-                        _ => unimplemented!("Unsupported left expression in Then condition"),
-                    };
-
-                    let val_right = match right.as_ref() {
-                        Expr::Value(Value::String(s)) => s.clone(),
-                        Expr::Value(Value::Number(n)) => n.to_string(),
-                        _ => unimplemented!("Unsupported right expression in Then condition"),
-                    };
-
-                    let condition_met = match operator {
-                        BinaryOperator::Eq => val_left == val_right,
-                        BinaryOperator::NotEq => val_left != val_right,
-                        BinaryOperator::Gt => val_left > val_right,
-                        BinaryOperator::Lt => val_left < val_right,
-                        BinaryOperator::Gte => val_left >= val_right,
-                        BinaryOperator::Lte => val_left <= val_right,
-                        _ => unimplemented!("Unsupported operator in Then condition"),
-                    };
-
-                    if condition_met {
-                        self.evaluate_vnode(child);
-                        *node = *child.clone();
-                    } else {
-                        *node = VNode::Empty;
-                    }
-                }
-            }
-            VNode::Repeat { times, child } => {
-                if let Expr::Value(Value::Number(n)) = times.as_ref() {
-                    let count = *n as usize;
-                    let mut repeated_nodes = Vec::new();
-
-                    if count == 0 {
-                        *node = VNode::Empty;
-                        return;
-                    }
-
-                    for _ in 0..count {
-                        repeated_nodes.push(child.as_ref().clone());
-                    }
-
-                    *node = VNode::Fragment(Box::new(repeated_nodes));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn resolve_binds(&mut self) {
-        let mut binds: BTreeMap<String, VNode> = BTreeMap::new();
-
-        self.globals.iter().for_each(|node| match node {
-            VNode::Variable { name, value, .. } => {
-                match value {
-                    Expr::Value(Value::String(value)) => {
-                        binds.insert(name.clone(), VNode::String(value.clone()));
-                    }
-
-                    Expr::Value(Value::Number(value)) => {
-                        binds.insert(name.clone(), VNode::Number(*value));
-                    }
-
-                    Expr::Shell(cmd) => {
-                        let command = Command::new("bash").args(&["-c", cmd]).output();
-
-                        if let Ok(output) = command {
-                            if output.status.success() {
-                                if let Ok(result) = String::from_utf8(output.stdout) {
-                                    binds.insert(
-                                        name.clone(),
-                                        VNode::String(result.trim().to_string()),
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    _ => { /* Handle other expression types if needed */ }
-                }
-            }
-            _ => {}
         });
-
-        self.root = self.replace_binds_in_vnode(&self.root, &binds);
     }
 
-    fn replace_binds_in_vnode(&self, node: &VNode, binds: &BTreeMap<String, VNode>) -> VNode {
-        match node {
-            VNode::Binding(name) => {
-                if let Some(replacement) = binds.get(name) {
-                    replacement.clone()
-                } else {
-                    node.clone()
-                }
-            }
-            VNode::Window { attributes, child } => {
-                let new_attributes = attributes
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.replace_binds_in_expr(v, binds)))
-                    .collect();
-
-                let new_child = Box::new(
-                    child
-                        .iter()
-                        .map(|c| self.replace_binds_in_vnode(c, binds))
-                        .collect(),
-                );
-
-                VNode::Window {
-                    attributes: new_attributes,
-                    child: new_child,
-                }
-            }
-            VNode::Then { cond, child } => {
-                let new_cond = Box::new(self.replace_binds_in_expr(cond, binds));
-                let new_child = Box::new(self.replace_binds_in_vnode(child, binds));
-
-                VNode::Then {
-                    cond: new_cond,
-                    child: new_child,
-                }
-            }
-            VNode::Repeat { times, child } => {
-                let new_times = Box::new(self.replace_binds_in_expr(times, binds));
-                let new_child = Box::new(self.replace_binds_in_vnode(child, binds));
-
-                VNode::Repeat {
-                    times: new_times,
-                    child: new_child,
-                }
-            }
-            VNode::Widget {
-                kind,
-                attributes,
-                child,
-            } => {
-                let new_attributes = attributes
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.replace_binds_in_expr(v, binds)))
-                    .collect();
-
-                let new_child = Box::new(
-                    child
-                        .iter()
-                        .map(|c| self.replace_binds_in_vnode(c, binds))
-                        .collect(),
-                );
-
-                VNode::Widget {
-                    kind: kind.clone(),
-                    attributes: new_attributes,
-                    child: new_child,
-                }
-            }
-            VNode::Variable {
-                name,
-                initial,
-                value,
-                interval,
-            } => {
-                let new_initial = initial
-                    .as_ref()
-                    .map(|init| self.replace_binds_in_expr(init, binds));
-                let new_value = self.replace_binds_in_expr(value, binds);
-
-                VNode::Variable {
-                    name: name.clone(),
-                    initial: new_initial,
-                    value: new_value,
-                    interval: *interval,
-                }
-            }
-
-            _ => node.clone(), // For String, Number, Error, return as is
-        }
-    }
-
-    fn replace_binds_in_expr(&self, expr: &Expr, binds: &BTreeMap<String, VNode>) -> Expr {
+    fn resolve_expr_vars(expr: &mut Expr) {
         match expr {
-            Expr::Binding(name) => {
-                match binds.get(name).unwrap() {
-                    VNode::String(s) => Expr::Value(Value::String(s.clone())),
-                    VNode::Number(n) => Expr::Value(Value::Number(*n)),
-                    _ => expr.clone(), // If the replacement is not a simple value, keep the original
-                }
-            }
-            Expr::Binary {
-                left,
-                operator,
-                right,
-            } => {
-                let new_left = Box::new(self.replace_binds_in_expr(left, binds));
-                let new_right = Box::new(self.replace_binds_in_expr(right, binds));
+            Expr::Shell(cmd) => {
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(&mut *cmd)
+                    .output()
+                    .expect("Failed to execute command");
 
-                Expr::Binary {
-                    left: new_left,
-                    operator: operator.clone(),
-                    right: new_right,
+                if output.status.success() {
+                    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    *expr = Expr::Value(Value::String(result));
+                } else {
+                    eprintln!(
+                        "Command '{}' failed with error: {}",
+                        cmd,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    exit(1);
                 }
             }
-            _ => expr.clone(), // For Value and Shell, return as is
+            _ => { /* Handle other expression types if needed */ }
         }
     }
 }
@@ -424,26 +559,6 @@ pub struct Stylesheet {
 pub struct Rule {
     pub selector: Selector,
     pub declarations: Vec<Declaration>,
-}
-
-impl Rule {
-    pub fn to_css(&self) -> String {
-        let mut css = String::new();
-
-        let selector = match &self.selector {
-            Selector::Tag(s) => s.clone(),
-            Selector::Class(s) => format!(".{}", s),
-            Selector::Id(s) => format!("#{}", s),
-        };
-
-        css.push_str(&format!("{} {{\n", selector));
-        for declaration in &self.declarations {
-            css.push_str(&format!("  {}\n", declaration.to_css(None)));
-        }
-        css.push_str("}\n");
-
-        css
-    }
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -467,33 +582,6 @@ pub enum Declaration {
         property: String,
         value: Vec<Declaration>,
     },
-}
-
-impl Declaration {
-    pub fn to_css(&self, prefix: Option<&str>) -> String {
-        match self {
-            Declaration::Simple { property, value } => {
-                let value_str = match value {
-                    Expr::Value(Value::String(s)) => s.clone(),
-                    Expr::Value(Value::Number(n)) => n.to_string(),
-                    _ => unimplemented!("Unsupported expression in declaration value"),
-                };
-                format!("{}{}: {};", prefix.unwrap_or(""), property, value_str)
-            }
-            Declaration::Nested { property, value } => {
-                let mut css = String::new();
-
-                value.into_iter().for_each(|d| {
-                    if matches!(d, Self::Simple { .. }) {
-                        css.push_str(&d.to_css(Some(&format!("{}-", property))));
-                        css.push('\n');
-                    }
-                });
-
-                css
-            }
-        }
-    }
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -538,6 +626,7 @@ pub enum VNode {
 #[derive(Debug, Clone)]
 pub enum WidgetKind {
     Label,
+    Rectangle,
     Row,
     Column,
     Absolute,

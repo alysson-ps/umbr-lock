@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use smithay_client_toolkit::seat::keyboard::Keysym;
 
 use crate::state::PasswordBuffer;
-use crate::types::{EventKeys, UiMessage};
+use crate::types::UiMessage;
 
 pub fn listen_for_keyboard_events(
     event: EventKeys,
@@ -16,9 +16,7 @@ pub fn listen_for_keyboard_events(
                 let passwd = String::from_utf8_lossy(&password.bytes).to_string();
 
                 sender
-                    .send(UiMessage::UnlockWithPassword {
-                        password: passwd,
-                    })
+                    .send(UiMessage::UnlockWithPassword { password: passwd })
                     .unwrap();
             }
             Keysym::BackSpace => {

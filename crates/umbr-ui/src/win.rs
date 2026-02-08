@@ -1,3 +1,7 @@
+use slint::{
+    SharedString,
+    platform::{Key, WindowEvent},
+};
 use smithay_client_toolkit::{
     delegate_keyboard, delegate_pointer, delegate_registry, delegate_seat, delegate_shm,
     reexports::client::Connection,
@@ -13,10 +17,7 @@ use smithay_client_toolkit::{
         slot::{Buffer, SlotPool},
     },
 };
-use std::{
-    convert::TryFrom,
-    sync::mpsc::{Receiver, Sender},
-};
+use std::sync::mpsc::{Receiver, Sender};
 use wayland_client::{
     Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     globals::registry_queue_init,
@@ -26,7 +27,7 @@ use wayland_client::{
         wl_compositor, wl_display,
         wl_keyboard::{self},
         wl_output, wl_pointer, wl_seat,
-        wl_shm::{self, WlShm},
+        wl_shm::WlShm,
         wl_surface::{self},
         wl_touch,
     },
@@ -36,7 +37,7 @@ use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_surface_v1, ext_session_lock_v1,
 };
 
-use crate::types::{EventKeys, UiMessage, WindowingMessage};
+use crate::types::{UiMessage, WindowingMessage};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -83,7 +84,6 @@ impl WindowingApp {
         session_lock.get_lock_surface(&wl_surface, &output, &qh, ());
 
         let state = AppData::new(
-            conn,
             RegistryState::new(&globals),
             display,
             wl_surface.clone(),
@@ -123,16 +123,6 @@ impl WindowingApp {
     pub fn process_ui_messages(&mut self) -> Result<()> {
         while let Ok(message) = self.receiver.try_recv() {
             match message {
-                UiMessage::Render {
-                    width,
-                    height,
-                    stride,
-                    n_channels,
-                    pixels,
-                } => {
-                    self.state
-                        .render(&pixels, width, height, stride, n_channels);
-                }
                 UiMessage::UnlockWithPassword { password } => {
                     if password.is_empty() {
                         self.state
@@ -143,6 +133,8 @@ impl WindowingApp {
                             .unwrap();
                         continue;
                     }
+
+                    dbg!("password received:", &password);
 
                     // Flow to unlock
                     {
@@ -200,7 +192,6 @@ struct AppData {
     running: bool,
     locked: bool,
     configured: bool,
-    connection: Connection,
 
     width: u32,
     height: u32,
@@ -222,7 +213,6 @@ struct AppData {
 
 impl AppData {
     fn new(
-        connection: Connection,
         registry_state: RegistryState,
         display: wl_display::WlDisplay,
         surface: wl_surface::WlSurface,
@@ -232,7 +222,6 @@ impl AppData {
         sender: Sender<WindowingMessage>,
     ) -> Self {
         Self {
-            connection,
             running: true,
             locked: false,
             configured: false,
@@ -250,144 +239,6 @@ impl AppData {
             touch: None,
             render_thread_sender: sender,
         }
-    }
-
-    fn render(&mut self, pixels: &[u8], width: i32, height: i32, stride: i32, n_channels: i32) {
-        if width <= 0 || height <= 0 {
-            eprintln!("Invalid pixbuf dimensions: {}x{}", width, height);
-            return;
-        }
-
-        if stride <= 0 {
-            eprintln!("Invalid pixbuf stride: {}", stride);
-            return;
-        }
-
-        if n_channels != 3 && n_channels != 4 {
-            eprintln!("Unsupported channel count: {}", n_channels);
-            return;
-        }
-
-        let (w, h) = (width as usize, height as usize);
-        let stride_usize = stride as usize;
-        let expected_len = match stride_usize.checked_mul(h) {
-            Some(len) => len,
-            None => {
-                eprintln!("Overflow expected_len");
-                return;
-            }
-        };
-
-        if pixels.len() != expected_len {
-            eprintln!(
-                "Unexpected pixel buffer length: expected {}, got {}",
-                expected_len,
-                pixels.len()
-            );
-            return;
-        }
-
-        let channels = n_channels as usize;
-        let row_bytes = match w.checked_mul(channels) {
-            Some(v) => v,
-            None => {
-                eprintln!("Overflow row_bytes");
-                return;
-            }
-        };
-
-        if row_bytes > stride_usize {
-            eprintln!(
-                "Row byte count ({}) exceeds stride ({}).",
-                row_bytes, stride_usize
-            );
-            return;
-        }
-
-        let dst_stride = match w.checked_mul(4) {
-            Some(v) => v,
-            None => {
-                eprintln!("Overflow dst_stride");
-                return;
-            }
-        };
-        let buffer_size = match dst_stride.checked_mul(h) {
-            Some(v) => v,
-            None => {
-                eprintln!("Overflow buffer_size");
-                return;
-            }
-        };
-
-        let mut pool = SlotPool::new(buffer_size, &self.shm_state).expect("create slot pool");
-        let dst_stride_i32 = i32::try_from(dst_stride).unwrap_or_else(|_| {
-            eprintln!("dst_stride doesn't fit i32");
-            0
-        });
-        if dst_stride_i32 == 0 {
-            return;
-        }
-
-        let (wlbuf, canvas) = pool
-            .create_buffer(width, height, dst_stride_i32, wl_shm::Format::Argb8888)
-            .expect("create buffer");
-
-        #[inline(always)]
-        fn premul(c: u8, a: u8) -> u8 {
-            // arredondado
-            ((c as u16 * a as u16 + 127) / 255) as u8
-        }
-
-        let has_alpha = channels == 4;
-
-        for y in 0..h {
-            let src_offset = y * stride_usize;
-            let dst_offset = y * dst_stride;
-
-            let src_line = &pixels[src_offset..src_offset + row_bytes];
-            let dst_line = &mut canvas[dst_offset..dst_offset + dst_stride];
-
-            if has_alpha {
-                // RGBA -> ARGB (premult)
-                for x in 0..w {
-                    let base = x * 4;
-                    let r = src_line[base + 0];
-                    let g = src_line[base + 1];
-                    let b = src_line[base + 2];
-                    let a = src_line[base + 3];
-
-                    let rp = premul(r, a);
-                    let gp = premul(g, a);
-                    let bp = premul(b, a);
-
-                    let px: u32 =
-                        ((a as u32) << 24) | ((rp as u32) << 16) | ((gp as u32) << 8) | (bp as u32);
-
-                    dst_line[x * 4..x * 4 + 4].copy_from_slice(&px.to_ne_bytes());
-                }
-            } else {
-                // RGB -> ARGB (a=255, sem premul efetivo)
-                for x in 0..w {
-                    let base = x * 3;
-                    let r = src_line[base + 0];
-                    let g = src_line[base + 1];
-                    let b = src_line[base + 2];
-                    let a = 255u8;
-
-                    let px: u32 =
-                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-
-                    dst_line[x * 4..x * 4 + 4].copy_from_slice(&px.to_ne_bytes());
-                }
-            }
-        }
-
-        self.buffers.push((wlbuf, pool));
-
-        self.wl_surface
-            .attach(Some(&self.buffers.last().unwrap().0.wl_buffer()), 0, 0);
-        self.wl_surface.damage_buffer(0, 0, width, height);
-        self.wl_surface.commit();
     }
 }
 
@@ -413,7 +264,6 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for AppData {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        dbg!(&event);
         match event {
             wl_buffer::Event::Release => {
                 // Handle buffer release
@@ -504,14 +354,40 @@ impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for AppD
 
             let sender = &state.render_thread_sender;
             if !state.configured {
+                sender
+                    .send(WindowingMessage::Ready {
+                        display_id: state.wl_display.id(),
+                        surface_id: state.wl_surface.id(),
+                        width,
+                        height,
+                    })
+                    .unwrap();
+
                 state.configured = true;
                 surface.ack_configure(serial);
-
-                sender
-                    .send(WindowingMessage::Ready { width, height })
-                    .unwrap();
             }
         }
+    }
+}
+
+fn sctk_key_event_to_slint(event: KeyEvent) -> Option<SharedString> {
+    match event.keysym {
+        Keysym::BackSpace => Some(Key::Backspace.into()),
+        Keysym::Tab => Some(Key::Tab.into()),
+        Keysym::Return => Some(Key::Return.into()),
+        Keysym::Delete => Some(Key::Delete.into()),
+        Keysym::Shift_L | Keysym::Shift_R => Some(Key::Shift.into()),
+        Keysym::Control_L | Keysym::Control_R => Some(Key::Control.into()),
+        Keysym::Alt_L | Keysym::Alt_R => Some(Key::Alt.into()),
+        Keysym::Caps_Lock => Some(Key::CapsLock.into()),
+        Keysym::Up => Some(Key::UpArrow.into()),
+        Keysym::Down => Some(Key::DownArrow.into()),
+        Keysym::Left => Some(Key::LeftArrow.into()),
+        Keysym::Right => Some(Key::RightArrow.into()),
+        Keysym::Insert => Some(Key::Insert.into()),
+        Keysym::Home => Some(Key::Home.into()),
+        Keysym::End => Some(Key::End.into()),
+        _ => event.utf8.map(String::into),
     }
 }
 
@@ -597,9 +473,13 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
-        self.render_thread_sender
-            .send(WindowingMessage::GtkEvent(EventKeys::Pressed { event }))
-            .unwrap();
+        if let Some(key) = sctk_key_event_to_slint(event) {
+            self.render_thread_sender
+                .send(WindowingMessage::Event(WindowEvent::KeyPressed {
+                    text: key,
+                }))
+                .unwrap();
+        }
     }
 
     fn release_key(
@@ -610,9 +490,13 @@ impl KeyboardHandler for AppData {
         _: u32,
         event: KeyEvent,
     ) {
-        self.render_thread_sender
-            .send(WindowingMessage::GtkEvent(EventKeys::Released { event }))
-            .unwrap();
+        if let Some(key) = sctk_key_event_to_slint(event) {
+            self.render_thread_sender
+                .send(WindowingMessage::Event(WindowEvent::KeyReleased {
+                    text: key,
+                }))
+                .unwrap();
+        }
     }
 
     fn update_modifiers(

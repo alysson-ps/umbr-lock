@@ -51,7 +51,8 @@ enum RuntimeMode {
     Standard,
 }
 
-fn main() -> Anyresult<()> {
+#[tokio::main]
+async fn main() -> Anyresult<()> {
     let cli = UmbrLock::parse();
 
     if let Some(command) = cli.command {
@@ -65,7 +66,7 @@ fn main() -> Anyresult<()> {
                         return Ok(());
                     }
 
-                    dbg!("Parsed Uheex:", ast);
+                    print!("{}", ast.to_slint());
                 }
             }
             Commands::Locker { config, preview } => {
@@ -80,7 +81,7 @@ fn main() -> Anyresult<()> {
                 if let Some(ast) = parser(config.as_str()) {
                     match mode {
                         RuntimeMode::Preview => {
-                            let _ui_runtime = umbr_ui::mount_ui_preview(ast);
+                            // let _ui_runtime = umbr_ui::mount_ui(senrder ast);
                         }
                         RuntimeMode::Standard => {
                             let (sender_to_render, receiver_from_windowing) =
@@ -98,11 +99,12 @@ fn main() -> Anyresult<()> {
                                 .initial_roundtrip()
                                 .map_err(|err| UmbrError::Generic(err.to_string()))?;
 
-                            let mut ui_runtime = umbr_ui::mount_ui_standard(
+                            let mut ui_runtime = umbr_ui::UiRuntime::standard(
                                 ast,
                                 sender_to_windowing.clone(),
                                 receiver_from_windowing,
-                            )?;
+                            )
+                            .await?;
 
                             windowing
                                 .process_ui_messages()
@@ -110,6 +112,7 @@ fn main() -> Anyresult<()> {
 
                             while windowing.is_running() && ui_runtime.is_running() {
                                 ui_runtime.process_messages()?;
+
                                 windowing
                                     .dispatch_blocking()
                                     .map_err(|err| UmbrError::Generic(err.to_string()))?;

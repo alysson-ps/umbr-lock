@@ -1,0 +1,52 @@
+warning: unused variable: `initial`
+   --> crates/uheex/src/types.rs:188:17
+    |
+188 |                 initial,
+    |                 ^^^^^^^-
+    |                 |
+    |                 help: try removing the field
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: `uheex` (lib) generated 1 warning (run `cargo fix --lib -p uheex` to apply 1 suggestion)
+warning: field `sender` is never read
+  --> crates/umbr-ui/src/lib.rs:25:5
+   |
+24 | pub struct UiRuntime {
+   |            --------- field in this struct
+25 |     sender: Option<Sender<UiMessage>>,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `LAYOUT_STYLE` is never used
+  --> crates/umbr-ui/src/lib.rs:32:7
+   |
+32 | const LAYOUT_STYLE: &str = r#"
+   |       ^^^^^^^^^^^^
+
+warning: variant `Password` is never constructed
+  --> crates/umbr-ui/src/slint_types/mod.rs:93:5
+   |
+92 |     RequiredProperties,
+   |     ------------------ variant in this enum
+93 |     Password -> ("passwd", ValueType::String)
+   |     ^^^^^^^^
+   |
+   = note: this warning originates in the macro `properties_check` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: field `touch` is never read
+   --> crates/umbr-ui/src/win.rs:209:5
+    |
+191 | struct AppData {
+    |        ------- field in this struct
+...
+209 |     touch: Option<wl_touch::WlTouch>,
+    |     ^^^^^
+
+warning: `umbr-ui` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized] target(s) in 0.30s
+     Running `target/debug/umbr-lock locker -c crates/uheex/exemples/layout.uheex`
+[crates/umbr-ui/src/win.rs:324:9] &event = Locked
+[crates/umbr-ui/src/win.rs:137:21] "password received:" = "password received:"
+[crates/umbr-ui/src/win.rs:137:21] &password = "nndsanwdjjedbkjfew"

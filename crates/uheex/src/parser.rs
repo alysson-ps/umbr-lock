@@ -109,6 +109,7 @@ where
                     "label" => WidgetKind::Label,
                     "row" => WidgetKind::Row,
                     "column" => WidgetKind::Column,
+                    "rectangle" => WidgetKind::Rectangle,
                     "absolute" => WidgetKind::Absolute,
                     _ => WidgetKind::Custom,
                 };
@@ -369,7 +370,7 @@ pub fn parser(code: &str) -> Option<Uheex> {
     }
 
     if let Some(mut result) = result {
-        result.evaluate();
+        result.resolve_vars();
 
         Some(result)
     } else {
